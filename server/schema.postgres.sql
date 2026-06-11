@@ -1,0 +1,23 @@
+CREATE TABLE IF NOT EXISTS teams (
+  id SERIAL PRIMARY KEY,
+  name VARCHAR(255) NOT NULL,
+  shortname VARCHAR(50) DEFAULT NULL,
+  logo VARCHAR(500) DEFAULT NULL,
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS matches (
+  id SERIAL PRIMARY KEY,
+  match_no INT DEFAULT 1,
+  blue_team_id INT DEFAULT NULL REFERENCES teams(id) ON DELETE SET NULL,
+  red_team_id INT DEFAULT NULL REFERENCES teams(id) ON DELETE SET NULL,
+  mode VARCHAR(10) DEFAULT 'BO3',
+  title VARCHAR(255) DEFAULT 'Match',
+  queue_order INT DEFAULT 1,
+  blue_score INT DEFAULT 0,
+  red_score INT DEFAULT 0,
+  status VARCHAR(50) DEFAULT 'queued',
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW()
+);
