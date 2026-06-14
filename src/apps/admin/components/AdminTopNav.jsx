@@ -17,7 +17,7 @@ function AdminTopNav({ onLogout }) {
     <header className="admin-topnav">
       <div className="admin-topnav-inner">
         <NavLink to="/dashboard" className="admin-brand">
-          <span className="admin-brand-mark">J</span>
+          <img src="/jeiziproductions.png" alt="Jeizi Productions" className="brand-logo-img" />
           <span>Jeizi Admin</span>
         </NavLink>
 

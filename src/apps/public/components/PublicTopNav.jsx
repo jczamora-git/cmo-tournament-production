@@ -16,8 +16,8 @@ function PublicTopNav() {
     <header className="admin-topnav">
       <div className="admin-topnav-inner">
         <NavLink to="/" className="admin-brand">
-          <span className="admin-brand-mark">J</span>
-          <span>Jeizi Tournament</span>
+          <img src="/jeiziproductions.png" alt="Jeizi Productions" className="brand-logo-img" />
+          <span>Jeizi Productions</span>
         </NavLink>
 
         <nav className="admin-nav-links" aria-label="Public navigation">
