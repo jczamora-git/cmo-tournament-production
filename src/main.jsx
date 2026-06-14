@@ -7,7 +7,7 @@ import "./styles/index.css";
 
 // Hostname-based routing: admin subdomain gets AdminApp, everything else gets PublicApp
 const hostname = window.location.hostname;
-const isAdmin =
+const isAdmin = 
   hostname.startsWith("admin.") || hostname === "admin.jeiziproductions.dev";
 
 function Root() {

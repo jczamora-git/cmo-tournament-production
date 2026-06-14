@@ -14,17 +14,26 @@ function buildCorsOptions() {
   const allowedOrigins = [
     "http://localhost:5173",
     "http://localhost:3000",
+    "https://www.jeiziproductions.dev",
+    "https://jeiziproductions.dev",
+    "https://admin.jeiziproductions.dev",
     process.env.FRONTEND_URL,
     process.env.ADMIN_URL,
   ].filter(Boolean);
 
+  // Deduplicate
+  const uniqueOrigins = [...new Set(allowedOrigins)];
+
   return {
     origin(origin, callback) {
-      if (!origin || allowedOrigins.includes(origin)) {
+      // Allow requests with no origin (server-to-server, curl, etc.)
+      if (!origin || uniqueOrigins.includes(origin)) {
         return callback(null, true);
       }
       return callback(new Error(`Not allowed by CORS: ${origin}`));
     },
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization", "x-admin-token"],
     credentials: true,
   };
 }
@@ -32,7 +41,12 @@ function buildCorsOptions() {
 function createApp({ restrictedCors = false } = {}) {
   const app = express();
 
-  app.use(cors(restrictedCors ? buildCorsOptions() : undefined));
+  const corsOptions = restrictedCors ? buildCorsOptions() : undefined;
+  app.use(cors(corsOptions));
+
+  // Explicitly handle OPTIONS preflight so it never falls through to error handlers
+  app.options("*", cors(corsOptions));
+
   app.use(express.json());
   app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
