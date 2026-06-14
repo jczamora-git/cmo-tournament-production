@@ -5,6 +5,7 @@ import UploadTeam from "./pages/UploadTeam";
 import ViewMatches from "./pages/ViewMatches";
 import ViewHistory from "./pages/ViewHistory";
 import ViewBracket from "./pages/ViewBracket";
+import WatchLive from "./pages/WatchLive";
 
 function PublicApp() {
   return (
@@ -17,6 +18,7 @@ function PublicApp() {
           <Route path="/matches" element={<ViewMatches />} />
           <Route path="/history" element={<ViewHistory />} />
           <Route path="/bracket" element={<ViewBracket />} />
+          <Route path="/live" element={<WatchLive />} />
         </Routes>
       </main>
     </div>

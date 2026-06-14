@@ -25,6 +25,12 @@ const overviewCards = [
     to: "/bracket",
     icon: "🏆",
   },
+  {
+    title: "Watch Live",
+    description: "Watch the official tournament broadcast",
+    to: "/live",
+    icon: "LIVE",
+  },
 ];
 
 function PublicHome() {

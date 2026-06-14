@@ -9,6 +9,7 @@ import ManageMatches from "./pages/ManageMatches";
 import ManageHistory from "./pages/ManageHistory";
 import ManageBracket from "./pages/ManageBracket";
 import TeamSubmissions from "./pages/TeamSubmissions";
+import AdminLiveSettings from "./pages/AdminLiveSettings";
 import LoadingState from "./components/LoadingState";
 
 function AdminApp() {
@@ -67,6 +68,7 @@ function AdminApp() {
           <Route path="/matches" element={<ManageMatches />} />
           <Route path="/history" element={<ManageHistory />} />
           <Route path="/bracket" element={<ManageBracket />} />
+          <Route path="/live-settings" element={<AdminLiveSettings />} />
         </Routes>
       </main>
     </div>

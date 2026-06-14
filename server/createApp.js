@@ -9,6 +9,8 @@ const adminAuthRoutes = require("./routes/admin.auth.routes");
 const adminTeamsRoutes = require("./routes/admin.teams.routes");
 const adminMatchesRoutes = require("./routes/admin.matches.routes");
 const adminSubmissionsRoutes = require("./routes/admin.submissions.routes");
+const liveSettingsRoutes = require("./routes/live.routes");
+const adminLiveSettingsRoutes = require("./routes/admin.live.routes");
 
 function buildCorsOptions() {
   const allowedOrigins = [
@@ -61,6 +63,7 @@ function createApp({ restrictedCors = false } = {}) {
   // Public read-only routes
   app.use("/api/teams", teamsRoutes);
   app.use("/api/matches", matchesRoutes);
+  app.use("/api/live-settings", liveSettingsRoutes);
 
   // Public team submission (no auth required)
   app.use("/api/team-submissions", submissionsRoutes);
@@ -72,6 +75,7 @@ function createApp({ restrictedCors = false } = {}) {
   app.use("/api/admin/teams", adminTeamsRoutes);
   app.use("/api/admin/matches", adminMatchesRoutes);
   app.use("/api/admin/team-submissions", adminSubmissionsRoutes);
+  app.use("/api/admin/live-settings", adminLiveSettingsRoutes);
 
   app.use((error, req, res, next) => {
     console.error("[api error]", error);

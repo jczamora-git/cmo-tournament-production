@@ -53,6 +53,7 @@ export const getMatches = () => request("/matches");
 export const getUpcomingMatches = () => request("/matches/upcoming");
 export const getMatchHistory = () => request("/matches/history");
 export const getMatchBracket = () => request("/matches/bracket");
+export const getPublicLiveSettings = () => request("/live-settings");
 
 // Public team submission
 export const submitTeam = (payload) =>
@@ -88,3 +89,8 @@ export const adminApproveSubmission = (id, edits) =>
   adminRequest(`/admin/team-submissions/${id}/approve`, { method: "PUT", body: edits || {} });
 export const adminRejectSubmission = (id) =>
   adminRequest(`/admin/team-submissions/${id}/reject`, { method: "PUT" });
+
+// Admin live settings
+export const adminGetLiveSettings = () => adminRequest("/admin/live-settings");
+export const adminUpdateLiveSettings = (payload) =>
+  adminRequest("/admin/live-settings", { method: "PUT", body: payload });

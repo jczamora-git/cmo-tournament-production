@@ -6,6 +6,7 @@ const navItems = [
   { to: "/matches", label: "Matches" },
   { to: "/history", label: "History" },
   { to: "/bracket", label: "Bracket" },
+  { to: "/live", label: "Watch Live" },
 ];
 
 function PublicTopNav() {
