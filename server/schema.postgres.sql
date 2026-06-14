@@ -21,3 +21,16 @@ CREATE TABLE IF NOT EXISTS matches (
   created_at TIMESTAMP DEFAULT NOW(),
   updated_at TIMESTAMP DEFAULT NOW()
 );
+
+CREATE TABLE IF NOT EXISTS team_submissions (
+  id SERIAL PRIMARY KEY,
+  team_name VARCHAR(255) NOT NULL,
+  shortname VARCHAR(50) DEFAULT NULL,
+  captain_name VARCHAR(255) NOT NULL,
+  contact VARCHAR(255) NOT NULL,
+  logo_url VARCHAR(500) DEFAULT NULL,
+  notes TEXT DEFAULT NULL,
+  status VARCHAR(20) DEFAULT 'pending',
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW()
+);
