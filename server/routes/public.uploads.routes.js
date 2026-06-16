@@ -1,0 +1,71 @@
+const express = require("express");
+const multer = require("multer");
+const { uploadTournamentImage } = require("../services/supabaseStorage");
+
+const router = express.Router();
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 },
+});
+
+const ALLOWED_MIMETYPES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+]);
+
+function makeSafeName(originalname) {
+  return originalname
+    .toLowerCase()
+    .replace(/[^a-z0-9.\-_]/g, "-")
+    .replace(/-+/g, "-");
+}
+
+router.post("/", upload.single("file"), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ message: "No file uploaded" });
+    }
+
+    if (!ALLOWED_MIMETYPES.has(req.file.mimetype)) {
+      return res.status(400).json({ message: "Invalid file type. Allowed: png, jpeg, webp" });
+    }
+
+    const { createClient } = require("@supabase/supabase-js");
+
+    const supabaseUrl = process.env.SUPABASE_URL;
+    const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SECRET_KEY;
+    const bucket = process.env.SUPABASE_STORAGE_BUCKET || "jeizi-storage";
+
+    if (!supabaseUrl || !supabaseKey) {
+      return res.status(500).json({ message: "Storage not configured" });
+    }
+
+    const supabase = createClient(supabaseUrl, supabaseKey);
+    const safeName = makeSafeName(req.file.originalname);
+    const date = new Date().toISOString().split("T")[0];
+    const filePath = `team-submissions/${date}/${Date.now()}-${safeName}`;
+
+    const { error } = await supabase.storage
+      .from(bucket)
+      .upload(filePath, req.file.buffer, {
+        contentType: req.file.mimetype,
+        upsert: true,
+      });
+
+    if (error) {
+      console.error("Team logo upload failed:", error);
+      return res.status(500).json({ message: "Upload failed: " + error.message });
+    }
+
+    const { data } = supabase.storage.from(bucket).getPublicUrl(filePath);
+
+    res.json({ success: true, url: data.publicUrl, path: filePath });
+  } catch (error) {
+    console.error("Team logo upload error:", error);
+    res.status(500).json({ message: error.message || "Upload failed" });
+  }
+});
+
+module.exports = router;

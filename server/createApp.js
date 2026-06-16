@@ -16,6 +16,7 @@ const videosRoutes = require("./routes/videos.routes");
 const adminTournamentsRoutes = require("./routes/admin.tournaments.routes");
 const adminVideosRoutes = require("./routes/admin.videos.routes");
 const adminUploadsRoutes = require("./routes/admin.uploads.routes");
+const publicUploadsRoutes = require("./routes/public.uploads.routes");
 
 function buildCorsOptions() {
   const allowedOrigins = [
@@ -77,6 +78,9 @@ function createApp({ restrictedCors = false } = {}) {
 
   // Public team submission (no auth required)
   app.use("/api/team-submissions", submissionsRoutes);
+
+  // Public team logo upload (no auth required)
+  app.use("/api/uploads/team-logo", publicUploadsRoutes);
 
   // Admin auth routes
   app.use("/api/admin", adminAuthRoutes);

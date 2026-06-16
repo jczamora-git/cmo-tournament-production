@@ -111,12 +111,22 @@ function TeamSubmissions() {
               <div className="admin-submission-details">
                 <p><strong>Captain:</strong> {sub.captain_name}</p>
                 <p><strong>Contact:</strong> {sub.contact}</p>
-                {sub.logo_url && (
-                  <p>
-                    <strong>Logo:</strong>{" "}
-                    <a href={sub.logo_url} target="_blank" rel="noreferrer">{sub.logo_url}</a>
-                  </p>
-                )}
+                <div style={{ display: "flex", alignItems: "center", gap: "10px", marginTop: "8px", marginBottom: "8px" }}>
+                  {sub.logo_url ? (
+                    <>
+                      <img
+                        src={sub.logo_url}
+                        alt={`${sub.team_name} logo`}
+                        style={{ width: "48px", height: "48px", borderRadius: "8px", objectFit: "contain", border: "1px solid var(--jz-border)", background: "rgba(0,0,0,0.3)" }}
+                      />
+                      <a href={sub.logo_url} target="_blank" rel="noreferrer" style={{ fontSize: "12px", color: "var(--jz-text-soft)" }}>View full logo</a>
+                    </>
+                  ) : (
+                    <div style={{ width: "48px", height: "48px", borderRadius: "8px", border: "1px solid var(--jz-border)", background: "rgba(255,255,255,0.05)", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: "bold", color: "var(--jz-text-soft)" }}>
+                      {sub.shortname ? sub.shortname.slice(0, 3).toUpperCase() : "?"}
+                    </div>
+                  )}
+                </div>
                 {sub.notes && <p><strong>Notes:</strong> {sub.notes}</p>}
                 <p className="admin-submission-date">
                   Submitted: {new Date(sub.created_at).toLocaleString()}
