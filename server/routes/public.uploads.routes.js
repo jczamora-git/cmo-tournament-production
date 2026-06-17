@@ -6,7 +6,7 @@ const router = express.Router();
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 5 * 1024 * 1024 },
+  limits: { fileSize: 3 * 1024 * 1024 },
 });
 
 const ALLOWED_MIMETYPES = new Set([
@@ -29,7 +29,7 @@ router.post("/", upload.single("file"), async (req, res) => {
     }
 
     if (!ALLOWED_MIMETYPES.has(req.file.mimetype)) {
-      return res.status(400).json({ message: "Invalid file type. Allowed: png, jpeg, webp" });
+      return res.status(400).json({ message: "Invalid logo file type. Please upload PNG, JPG, or WebP." });
     }
 
     const { createClient } = require("@supabase/supabase-js");
@@ -55,8 +55,13 @@ router.post("/", upload.single("file"), async (req, res) => {
       });
 
     if (error) {
-      console.error("Team logo upload failed:", error);
-      return res.status(500).json({ message: "Upload failed: " + error.message });
+      console.error("Team logo upload failed", {
+        message: error.message,
+        code: error.code,
+        status: error.status,
+        details: error.details,
+      });
+      return res.status(500).json({ message: "Logo upload failed. Please try again." });
     }
 
     const { data } = supabase.storage.from(bucket).getPublicUrl(filePath);
@@ -64,7 +69,7 @@ router.post("/", upload.single("file"), async (req, res) => {
     res.json({ success: true, url: data.publicUrl, path: filePath });
   } catch (error) {
     console.error("Team logo upload error:", error);
-    res.status(500).json({ message: error.message || "Upload failed" });
+    res.status(500).json({ message: "Logo upload failed. Please try again." });
   }
 });
 

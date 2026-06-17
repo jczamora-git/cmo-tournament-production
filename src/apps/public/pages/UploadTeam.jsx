@@ -34,6 +34,12 @@ function UploadTeam() {
     setUploadError("");
     setUploading(true);
 
+    if (file.size > 3 * 1024 * 1024) {
+      setUploadError("Logo file is too large. Please upload an image under 3MB.");
+      setUploading(false);
+      return;
+    }
+
     try {
       const formData = new FormData();
       formData.append("file", file);
@@ -52,7 +58,7 @@ function UploadTeam() {
       setForm((prev) => ({ ...prev, logo_url: data.url }));
       setUploadedFileName(file.name);
     } catch (err) {
-      setUploadError("Logo upload failed. Please try again.");
+      setUploadError(err.message || "Logo upload failed. Please try again.");
     } finally {
       setUploading(false);
       if (fileRef.current) fileRef.current.value = "";
@@ -137,7 +143,7 @@ function UploadTeam() {
 
           <div className="form-group">
             <label>Team Logo *</label>
-            <p className="form-helper-text">Upload your team logo in PNG, JPG, or WebP format. Max 5MB.</p>
+            <p className="form-helper-text">Upload your team logo in PNG, JPG, or WebP format. Max 3MB.</p>
             
             <input
               ref={fileRef}

@@ -55,7 +55,7 @@ const uploadTeamLogo = multer({
     return `${slug}_logo_${Date.now()}${ext}`;
   }),
   fileFilter: imageFileFilter,
-  limits: { fileSize: 5 * 1024 * 1024 },
+  limits: { fileSize: 3 * 1024 * 1024 },
 });
 
 module.exports = {

@@ -25,6 +25,8 @@ function buildCorsOptions() {
     "https://www.jeiziproductions.dev",
     "https://jeiziproductions.dev",
     "https://admin.jeiziproductions.dev",
+    "https://www.jeiziproductions.app",
+    "https://jeiziproductions.app",
     "https://jeiziproduction.vercel.app",
     "https://adminjeizi.vercel.app",
     "https://jeizi-overlay-v2.vercel.app",
@@ -95,6 +97,16 @@ function createApp({ restrictedCors = false } = {}) {
   app.use("/api/admin/uploads/tournament-image", adminUploadsRoutes);
 
   app.use((error, req, res, next) => {
+    if (error.code === "LIMIT_FILE_SIZE") {
+      return res.status(413).json({
+        message: "Logo file is too large. Please upload an image under 3MB.",
+      });
+    }
+    if (error.message === "Only image files are allowed") {
+      return res.status(400).json({
+        message: "Invalid logo file type. Please upload PNG, JPG, or WebP.",
+      });
+    }
     console.error("[api error]", error);
     res.status(500).json({
       message: "Internal server error",
