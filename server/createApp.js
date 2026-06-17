@@ -31,6 +31,7 @@ function buildCorsOptions() {
     "https://adminjeizi.vercel.app",
     "https://jeizi-overlay-v2.vercel.app",
     "https://www.cmotournaments.live",
+    "https://cmotournaments.live",
     process.env.FRONTEND_URL,
     process.env.ADMIN_URL,
   ].filter(Boolean);
