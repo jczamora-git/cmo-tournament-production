@@ -1,6 +1,7 @@
 const express = require("express");
 const multer = require("multer");
 const { uploadTournamentImage } = require("../services/supabaseStorage");
+const db = require("../db");
 
 const router = express.Router();
 
@@ -28,6 +29,12 @@ router.post("/", upload.single("file"), async (req, res) => {
     origin: req.headers.origin,
   });
   try {
+    const [settingRows] = await db.query(
+      "SELECT setting_value FROM app_settings WHERE setting_key = 'team_upload_enabled'"
+    );
+    if (settingRows.length > 0 && settingRows[0].setting_value === "false") {
+      return res.status(403).json({ message: "Team logo upload is currently closed." });
+    }
     if (!req.file) {
       return res.status(400).json({ message: "No file uploaded" });
     }

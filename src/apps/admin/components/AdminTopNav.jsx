@@ -10,6 +10,7 @@ const navItems = [
   { to: "/bracket", label: "Bracket" },
   { to: "/videos", label: "Videos" },
   { to: "/live-settings", label: "Live" },
+  { to: "/registration-settings", label: "Registration" },
 ];
 
 function AdminTopNav({ onLogout }) {

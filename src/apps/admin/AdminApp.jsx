@@ -12,6 +12,7 @@ import TeamSubmissions from "./pages/TeamSubmissions";
 import AdminLiveSettings from "./pages/AdminLiveSettings";
 import ManageTournaments from "./pages/ManageTournaments";
 import ManageVideos from "./pages/ManageVideos";
+import RegistrationSettings from "./pages/RegistrationSettings";
 import LoadingState from "./components/LoadingState";
 
 function AdminApp() {
@@ -73,6 +74,7 @@ function AdminApp() {
           <Route path="/bracket" element={<ManageBracket />} />
           <Route path="/videos" element={<ManageVideos />} />
           <Route path="/live-settings" element={<AdminLiveSettings />} />
+          <Route path="/registration-settings" element={<RegistrationSettings />} />
         </Routes>
       </main>
     </div>

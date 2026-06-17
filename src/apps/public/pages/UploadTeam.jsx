@@ -1,4 +1,4 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { submitTeam } from "../../../services/api";
 import { apiUrl } from "../../../config/api";
@@ -22,6 +22,25 @@ function UploadTeam() {
   const [error, setError] = useState("");
   const [uploadedFileName, setUploadedFileName] = useState("");
   const fileRef = useRef(null);
+
+  const [settingsLoading, setSettingsLoading] = useState(true);
+  const [uploadEnabled, setUploadEnabled] = useState(true);
+  const [closedMessage, setClosedMessage] = useState("");
+
+  useEffect(() => {
+    fetch(apiUrl("/api/public-settings"))
+      .then((res) => res.json())
+      .then((data) => {
+        setUploadEnabled(data.team_upload_enabled !== false);
+        setClosedMessage(data.team_upload_closed_message || "Team registration and logo upload are now closed.");
+      })
+      .catch(() => {
+        setUploadEnabled(true);
+      })
+      .finally(() => {
+        setSettingsLoading(false);
+      });
+  }, []);
 
   const VALID_TYPES = new Set(["image/png", "image/jpeg", "image/webp"]);
 
@@ -136,6 +155,36 @@ function UploadTeam() {
       setLoading(false);
     }
   };
+
+  if (settingsLoading) {
+    return (
+      <div className="ph-section team-upload-page" style={{ textAlign: "center", padding: "100px 20px" }}>
+        <h2 style={{ color: "#94a3b8" }}>Loading...</h2>
+      </div>
+    );
+  }
+
+  if (!uploadEnabled) {
+    return (
+      <div className="ph-section team-upload-page">
+        <div className="team-registration-card" style={{ textAlign: "center", padding: "60px 20px" }}>
+          <div style={{ fontSize: "48px", marginBottom: "20px" }}>🔒</div>
+          <h2 style={{ fontSize: "24px", color: "#f8fafc", marginBottom: "16px" }}>Team Registration Closed</h2>
+          <p style={{ color: "#94a3b8", fontSize: "16px", marginBottom: "32px", lineHeight: "1.6" }}>
+            {closedMessage}
+          </p>
+          <button 
+            type="button" 
+            className="ph-btn ph-btn-primary" 
+            onClick={() => navigate("/")}
+            style={{ minWidth: "200px" }}
+          >
+            Back to Home
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="ph-section team-upload-page">

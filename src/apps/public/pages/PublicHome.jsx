@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { getTournaments } from "../../../services/api";
+import { apiUrl } from "../../../config/api";
 
 const MODAL_KEY = "jeizi_registration_modal_dismissed";
 
@@ -71,6 +72,7 @@ function PublicHome() {
   const [tournaments, setTournaments] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showModal, setShowModal] = useState(false);
+  const [uploadEnabled, setUploadEnabled] = useState(true);
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -78,12 +80,17 @@ function PublicHome() {
       .then((data) => setTournaments(data || []))
       .catch(() => setTournaments([]))
       .finally(() => setLoading(false));
+
+    fetch(apiUrl("/api/public-settings"))
+      .then((res) => res.json())
+      .then((data) => setUploadEnabled(data.team_upload_enabled !== false))
+      .catch(() => setUploadEnabled(true));
   }, []);
 
   useEffect(() => {
     if (!loading) {
       const dismissed = sessionStorage.getItem(MODAL_KEY);
-      if (!dismissed) {
+      if (!dismissed && uploadEnabled) {
         const timer = setTimeout(() => setShowModal(true), 1500);
         return () => clearTimeout(timer);
       }
@@ -144,9 +151,15 @@ function PublicHome() {
           </div>
         )}
         <div className="ph-hero-actions">
-          <Link to={featured ? `/upload-team?tournament=${featured.id}` : "/upload-team"} className="ph-btn ph-btn-primary">
-            Upload Team
-          </Link>
+          {uploadEnabled ? (
+            <Link to={featured ? `/upload-team?tournament=${featured.id}` : "/upload-team"} className="ph-btn ph-btn-primary">
+              Upload Team
+            </Link>
+          ) : (
+            <Link to="/upload-team" className="ph-btn ph-btn-secondary" style={{ opacity: 0.7 }}>
+              Registration Closed
+            </Link>
+          )}
           <Link to="/live" className="ph-btn ph-btn-blue">
             Watch Live
           </Link>
@@ -183,9 +196,11 @@ function PublicHome() {
               <Link to="/tournaments" className="ph-btn ph-btn-secondary">
                 View Tournament
               </Link>
-              <Link to={`/upload-team?tournament=${featured.id}`} className="ph-btn ph-btn-primary">
-                Upload Team
-              </Link>
+              {uploadEnabled && (
+                <Link to={`/upload-team?tournament=${featured.id}`} className="ph-btn ph-btn-primary">
+                  Upload Team
+                </Link>
+              )}
             </div>
           </div>
         </section>
@@ -214,10 +229,10 @@ function PublicHome() {
         </div>
         <div className="ph-tiles">
           <Link to="/upload-team" className="ph-tile">
-            <div className="ph-tile-icon">📋</div>
+            <div className="ph-tile-icon" style={{ background: uploadEnabled ? undefined : "rgba(148, 163, 184, 0.12)", borderColor: uploadEnabled ? undefined : "rgba(148, 163, 184, 0.2)", color: uploadEnabled ? undefined : "#94a3b8" }}>📋</div>
             <div className="ph-tile-content">
-              <h3>Register Team</h3>
-              <p>Submit your team details and logo for the tournament.</p>
+              <h3 style={{ color: uploadEnabled ? undefined : "#94a3b8" }}>{uploadEnabled ? "Register Team" : "Registration Closed"}</h3>
+              <p>{uploadEnabled ? "Submit your team details and logo for the tournament." : "Team registration and logo upload are now closed."}</p>
             </div>
           </Link>
           <Link to="/live" className="ph-tile">
@@ -278,12 +293,13 @@ function PublicHome() {
 
       {/* Footer CTA */}
       <section className="ph-footer-cta">
-        <h2>Ready to join the tournament?</h2>
+        <h2>{uploadEnabled ? "Ready to join the tournament?" : "Tournament in progress"}</h2>
         <button
-          className="ph-btn ph-btn-primary"
+          className={uploadEnabled ? "ph-btn ph-btn-primary" : "ph-btn ph-btn-secondary"}
           onClick={() => navigate("/upload-team")}
+          style={!uploadEnabled ? { opacity: 0.7 } : {}}
         >
-          Submit Your Team
+          {uploadEnabled ? "Submit Your Team" : "Registration Closed"}
         </button>
       </section>
 

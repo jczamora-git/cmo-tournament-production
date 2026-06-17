@@ -6,6 +6,26 @@ const router = express.Router();
 // Public: submit a team (creates pending submission)
 router.post("/", async (req, res) => {
   try {
+    const [settingRows] = await db.query(
+      "SELECT setting_key, setting_value FROM app_settings WHERE setting_key IN ('team_upload_enabled', 'team_upload_closed_message')"
+    );
+    
+    let isEnabled = true;
+    let closedMessage = "Team registration and logo upload are now closed.";
+    
+    settingRows.forEach(row => {
+      if (row.setting_key === "team_upload_enabled") {
+        isEnabled = row.setting_value === "true";
+      }
+      if (row.setting_key === "team_upload_closed_message" && row.setting_value) {
+        closedMessage = row.setting_value;
+      }
+    });
+
+    if (!isEnabled) {
+      return res.status(403).json({ message: closedMessage });
+    }
+
     const { team_name, shortname, captain_name, contact, logo_url, notes } = req.body;
 
     if (!team_name || !team_name.trim()) {

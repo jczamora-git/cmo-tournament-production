@@ -17,6 +17,8 @@ const adminTournamentsRoutes = require("./routes/admin.tournaments.routes");
 const adminVideosRoutes = require("./routes/admin.videos.routes");
 const adminUploadsRoutes = require("./routes/admin.uploads.routes");
 const publicUploadsRoutes = require("./routes/public.uploads.routes");
+const publicSettingsRoutes = require("./routes/public.settings.routes");
+const adminSettingsRoutes = require("./routes/admin.settings.routes");
 
 function buildCorsOptions() {
   const allowedOrigins = [
@@ -80,6 +82,9 @@ function createApp({ restrictedCors = false } = {}) {
   app.use("/api/tournaments", tournamentsRoutes);
   app.use("/api/videos", videosRoutes);
 
+  // Public settings
+  app.use("/api/public-settings", publicSettingsRoutes);
+
   // Public team submission (no auth required)
   app.use("/api/team-submissions", submissionsRoutes);
 
@@ -97,6 +102,7 @@ function createApp({ restrictedCors = false } = {}) {
   app.use("/api/admin/tournaments", adminTournamentsRoutes);
   app.use("/api/admin/videos", adminVideosRoutes);
   app.use("/api/admin/uploads/tournament-image", adminUploadsRoutes);
+  app.use("/api/admin/registration-settings", adminSettingsRoutes);
 
   app.use((error, req, res, next) => {
     if (error.code === "LIMIT_FILE_SIZE") {
