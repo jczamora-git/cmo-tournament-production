@@ -1,8 +1,10 @@
 import { useState, useRef } from "react";
+import { useNavigate } from "react-router-dom";
 import { submitTeam } from "../../../services/api";
 import { apiUrl } from "../../../config/api";
 
 function UploadTeam() {
+  const navigate = useNavigate();
   const [form, setForm] = useState({
     team_name: "",
     shortname: "",
@@ -123,6 +125,10 @@ function UploadTeam() {
       setSuccess("Team submitted successfully. Please wait for admin approval.");
       setForm({ team_name: "", shortname: "", captain_name: "", contact: "", logo_url: "", notes: "" });
       setUploadedFileName("");
+      
+      setTimeout(() => {
+        navigate("/");
+      }, 1800);
     } catch (err) {
       setError(err.message);
     } finally {
