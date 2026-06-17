@@ -18,6 +18,7 @@ function UploadTeam() {
   const [uploadError, setUploadError] = useState("");
   const [uploadStatus, setUploadStatus] = useState("");
   const [success, setSuccess] = useState("");
+  const [showSuccessModal, setShowSuccessModal] = useState(false);
   const [error, setError] = useState("");
   const [uploadedFileName, setUploadedFileName] = useState("");
   const fileRef = useRef(null);
@@ -122,13 +123,13 @@ function UploadTeam() {
     setLoading(true);
     try {
       const result = await submitTeam(form);
-      setSuccess("Team submitted successfully. Please wait for admin approval.");
+      setShowSuccessModal(true);
       setForm({ team_name: "", shortname: "", captain_name: "", contact: "", logo_url: "", notes: "" });
       setUploadedFileName("");
       
       setTimeout(() => {
         navigate("/");
-      }, 1800);
+      }, 2000);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -266,6 +267,34 @@ function UploadTeam() {
           </button>
         </form>
       </div>
+
+      {showSuccessModal && (
+        <div className="submission-success-backdrop">
+          <div className="submission-success-modal">
+            <div className="submission-success-icon">
+              <svg width="32" height="32" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7"/>
+              </svg>
+            </div>
+            <h2 className="submission-success-title">Team Submitted Successfully!</h2>
+            <p className="submission-success-message">
+              Your team logo and details have been submitted. Please wait for admin approval.
+            </p>
+            <p style={{ color: "#64748b", fontSize: "13px" }}>Redirecting you back to the homepage...</p>
+            
+            <div className="submission-success-footer">
+              <button 
+                type="button" 
+                className="ph-btn ph-btn-secondary" 
+                onClick={() => navigate("/")}
+                style={{ width: "100%" }}
+              >
+                Back to Home
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
