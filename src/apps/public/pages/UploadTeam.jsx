@@ -21,6 +21,46 @@ function getTournamentInitials(name) {
     .toUpperCase();
 }
 
+function getModeSelectLabel(mode) {
+  const code = String(mode?.code || "")
+    .trim()
+    .toUpperCase();
+
+  switch (code) {
+    case "MP":
+      return "Select MP Mode";
+
+    case "BR":
+      return "Select BR Mode";
+
+    case "MOBA":
+      return "Select MOBA";
+
+    case "MAGIC_CHESS":
+      return "Select Magic Chess";
+
+    default: {
+      const name = String(
+        mode?.name || code || "Division"
+      ).trim();
+
+      return `Select ${name}`;
+    }
+  }
+}
+
+function getModeBadgeLabel(mode) {
+  const code = String(mode?.code || "")
+    .trim()
+    .toUpperCase();
+
+  if (code === "MAGIC_CHESS") {
+    return "MAGIC CHESS";
+  }
+
+  return code || "MODE";
+}
+
 function truncateModeCaption(value, maxLength = 12) {
   const text = String(value || "").trim().toUpperCase();
 
@@ -71,6 +111,36 @@ function getModeTileContent(mode) {
   }
 }
 
+const MODE_CARD_IMAGES = {
+  CODM: {
+    MP: "/codm-mp.png",
+    BR: "/codm-br.png",
+  },
+  MLBB: {
+    MOBA: "/mlbb-moba.png",
+    MAGIC_CHESS: "/mlbb-magic_chess.png",
+  },
+  HOK: {
+    MOBA: "/hok_moba.png",
+  },
+};
+
+function getModeCardImage(gameType, modeCode) {
+  const normalizedGame = String(gameType || "")
+    .trim()
+    .toUpperCase();
+
+  const normalizedMode = String(modeCode || "")
+    .trim()
+    .toUpperCase();
+
+  return (
+    MODE_CARD_IMAGES[normalizedGame]?.[
+      normalizedMode
+    ] || null
+  );
+}
+
 function UploadTeam() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -106,8 +176,8 @@ function UploadTeam() {
   const [selectionInitialized, setSelectionInitialized] = useState(false);
   const [selectionModal, setSelectionModal] = useState(null);
 
-  const tournamentTrackRef = useRef(null);
-  const [activeTournamentIndex, setActiveTournamentIndex] = useState(0);
+  const modeTrackRef = useRef(null);
+  const [activeModeIndex, setActiveModeIndex] = useState(0);
 
   const canChangeTournament = tournaments.length > 1;
   const canChangeMode = modes.length > 1;
@@ -235,17 +305,24 @@ function UploadTeam() {
 
   useEffect(() => {
     if (
-      selectionModal !== "tournament" ||
-      !tournaments.length
+      selectionModal !== "mode" ||
+      !modes.length
     ) {
       return;
     }
 
-    setActiveTournamentIndex(0);
+    setActiveModeIndex(0);
 
     const frame = window.requestAnimationFrame(
       () => {
-        scrollToTournamentCard(0, "auto");
+        const track = modeTrackRef.current;
+
+        if (track) {
+          track.scrollTo({
+            left: 0,
+            behavior: "auto",
+          });
+        }
       }
     );
 
@@ -254,69 +331,35 @@ function UploadTeam() {
     };
   }, [
     selectionModal,
-    tournaments.length,
+    modes.length,
   ]);
 
-  const VALID_TYPES = new Set(["image/png", "image/jpeg", "image/webp"]);
+  function scrollToModeCard(requestedIndex) {
+    const track = modeTrackRef.current;
 
-  const handleChange = (e) => {
-    setForm({ ...form, [e.target.name]: e.target.value });
-  };
-
-  function clampTournamentIndex(index) {
-    if (!tournaments.length) return 0;
-
-    return Math.max(
-      0,
-      Math.min(index, tournaments.length - 1)
-    );
-  }
-
-  function scrollToTournamentCard(
-    requestedIndex,
-    behavior = "smooth"
-  ) {
-    const track = tournamentTrackRef.current;
-
-    if (!track) return;
+    if (!track || !modes.length) return;
 
     const cards = Array.from(track.children);
 
-    if (!cards.length) return;
-
-    const nextIndex =
-      clampTournamentIndex(requestedIndex);
+    const nextIndex = Math.max(
+      0,
+      Math.min(requestedIndex, cards.length - 1)
+    );
 
     const card = cards[nextIndex];
 
     if (!card) return;
 
-    const targetLeft =
-      card.offsetLeft -
-      (track.clientWidth - card.clientWidth) / 2;
-
     track.scrollTo({
-      left: Math.max(0, targetLeft),
-      behavior,
+      left: card.offsetLeft,
+      behavior: "smooth",
     });
 
-    setActiveTournamentIndex(nextIndex);
+    setActiveModeIndex(nextIndex);
   }
 
-  function handlePreviousTournament() {
-    scrollToTournamentCard(
-      activeTournamentIndex - 1
-    );
-  }
-
-  function handleNextTournament() {
-    scrollToTournamentCard(
-      activeTournamentIndex + 1
-    );
-  }
-
-  function handleTournamentTrackScroll() {
-    const track = tournamentTrackRef.current;
+  function handleModeTrackScroll() {
+    const track = modeTrackRef.current;
 
     if (!track) return;
 
@@ -344,8 +387,14 @@ function UploadTeam() {
       }
     });
 
-    setActiveTournamentIndex(closestIndex);
+    setActiveModeIndex(closestIndex);
   }
+
+  const VALID_TYPES = new Set(["image/png", "image/jpeg", "image/webp"]);
+
+  const handleChange = (e) => {
+    setForm({ ...form, [e.target.name]: e.target.value });
+  };
 
   const handleTournamentSelect = (t) => {
     setSelectedTournament(t);
@@ -620,9 +669,7 @@ function UploadTeam() {
             
             <div className="registration-tournament-carousel">
               <div
-                ref={tournamentTrackRef}
                 className="registration-tournament-track"
-                onScroll={handleTournamentTrackScroll}
               >
                 {tournaments.map((tournament) => {
                   const logoUrl =
@@ -712,67 +759,13 @@ function UploadTeam() {
               })}
             </div>
 
+            </div>
+
             {tournaments.length > 1 && (
-              <div className="registration-tournament-mobile-nav">
-                <p className="registration-tournament-swipe-hint">
-                  Swipe or use the arrows to browse tournaments
-                </p>
-
-                <div className="registration-tournament-controls">
-                  <button
-                    type="button"
-                    className="registration-tournament-arrow"
-                    onClick={handlePreviousTournament}
-                    disabled={activeTournamentIndex === 0}
-                    aria-label="Previous tournament"
-                  >
-                    ‹
-                  </button>
-
-                  <span
-                    className="registration-tournament-index"
-                    aria-live="polite"
-                  >
-                    {activeTournamentIndex + 1}
-                    {" / "}
-                    {tournaments.length}
-                  </span>
-
-                  <button
-                    type="button"
-                    className="registration-tournament-arrow"
-                    onClick={handleNextTournament}
-                    disabled={
-                      activeTournamentIndex ===
-                      tournaments.length - 1
-                    }
-                    aria-label="Next tournament"
-                  >
-                    ›
-                  </button>
-                </div>
-
-                <div
-                  className="registration-tournament-dots"
-                  aria-hidden="true"
-                >
-                  {tournaments.map((tournament, index) => (
-                    <span
-                      key={tournament.id}
-                      className={[
-                        "registration-tournament-dot",
-                        index === activeTournamentIndex
-                          ? "is-active"
-                          : "",
-                      ]
-                        .filter(Boolean)
-                        .join(" ")}
-                    />
-                  ))}
-                </div>
-              </div>
+              <p className="registration-swipe-hint">
+                Swipe to browse tournaments
+              </p>
             )}
-          </div>
 
             <div className="registration-selection-footer">
               <button
@@ -789,36 +782,129 @@ function UploadTeam() {
 
       {selectionModal === "mode" && selectedTournament && (
         <div className="ph-modal-backdrop">
-          <div className="ph-modal registration-selection-modal" role="dialog" aria-modal="true" aria-labelledby="reg-mode-title">
+          <div
+            className={[
+              "ph-modal",
+              "registration-selection-modal",
+              "is-mode-selector",
+            ].join(" ")}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="reg-mode-title"
+          >
             <div className="registration-selection-header">
               <span className="registration-selection-eyebrow">Select Division</span>
               <h2 id="reg-mode-title" className="registration-selection-title">{selectedTournament.name}</h2>
             </div>
             
-            <div className="registration-mode-grid">
-              {modes.map(m => {
-                const tile = getModeTileContent(m);
+            <div
+              ref={modeTrackRef}
+              className="registration-mode-card-grid"
+              onScroll={handleModeTrackScroll}
+            >
+              {modes.map((mode) => {
+                const tile = getModeTileContent(mode);
+
+                const imageSrc = getModeCardImage(
+                  selectedTournament?.game_type,
+                  mode.code
+                );
+
+                const accessibleModeName =
+                  mode.name ||
+                  tile.caption ||
+                  tile.heading ||
+                  mode.code ||
+                  "Tournament division";
+
                 return (
-                  <button 
-                    key={m.id} 
-                    type="button"
-                    className="registration-mode-tile" 
-                    onClick={() => applyModeSelection(m)}
-                    aria-label={`Select ${m.name || tile.heading}`}
+                  <article
+                    key={mode.id}
+                    className="registration-mode-card"
                   >
-                    <span className="registration-mode-tile-heading">
-                      {tile.heading}
-                    </span>
-                    <span 
-                      className="registration-mode-tile-caption"
-                      title={tile.caption}
-                    >
-                      {truncateModeCaption(tile.caption, 12)}
-                    </span>
-                  </button>
+                    <div className="registration-mode-card-media">
+                      <span className="registration-mode-card-badge">
+                        {getModeBadgeLabel(mode)}
+                      </span>
+
+                      {imageSrc ? (
+                        <img
+                          src={imageSrc}
+                          alt={`${accessibleModeName} division`}
+                          className="registration-mode-card-image"
+                          loading="eager"
+                        />
+                      ) : (
+                        <div className="registration-mode-card-fallback">
+                          <span className="registration-mode-card-fallback-heading">
+                            {tile.heading}
+                          </span>
+
+                          <span className="registration-mode-card-fallback-caption">
+                            {truncateModeCaption(
+                              tile.caption,
+                              12
+                            )}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="registration-mode-card-actions">
+                      <button
+                        type="button"
+                        className="registration-mode-card-select"
+                        onClick={() =>
+                          applyModeSelection(mode)
+                        }
+                        aria-label={getModeSelectLabel(mode)}
+                      >
+                        {getModeSelectLabel(mode)}
+                      </button>
+                    </div>
+                  </article>
                 );
               })}
             </div>
+
+            {modes.length > 1 && (
+              <>
+                <p className="registration-swipe-hint">
+                  Swipe to browse divisions
+                </p>
+
+                <div
+                  className="registration-mode-dots"
+                  aria-label="Division navigation"
+                >
+                  {modes.map((mode, index) => (
+                    <button
+                      key={mode.id}
+                      type="button"
+                      className={[
+                        "registration-mode-dot",
+                        index === activeModeIndex
+                          ? "is-active"
+                          : "",
+                      ]
+                        .filter(Boolean)
+                        .join(" ")}
+                      onClick={() =>
+                        scrollToModeCard(index)
+                      }
+                      aria-label={`View ${
+                        mode.name || mode.code
+                      }`}
+                      aria-current={
+                        index === activeModeIndex
+                          ? "true"
+                          : undefined
+                      }
+                    />
+                  ))}
+                </div>
+              </>
+            )}
 
             <div className="registration-selection-footer">
               {canChangeTournament && (
