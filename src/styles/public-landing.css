@@ -1014,54 +1014,59 @@
     object-fit: contain;
   }
 
-  .public-mobile-menu-close {
+  .public-mobile-nav-sheet
+  button.public-mobile-menu-close {
     all: unset;
-
     box-sizing: border-box;
     position: relative;
-
-    flex: 0 0 42px;
-    width: 42px;
-    height: 42px;
-
+    display: block;
+    flex: 0 0 40px;
+    width: 40px;
+    height: 40px;
+    margin: 0;
+    padding: 0;
+    border: 0 !important;
+    border-radius: 8px;
+    background: transparent !important;
+    box-shadow: none !important;
     cursor: pointer;
+    transition: opacity 150ms ease, background-color 150ms ease;
   }
 
-  .public-mobile-menu-close span {
+  .public-mobile-nav-sheet
+  button.public-mobile-menu-close:hover {
+    background: rgba(255, 255, 255, 0.05) !important;
+  }
+
+  .public-mobile-nav-sheet
+  button.public-mobile-menu-close
+  span {
     position: absolute;
     top: 50%;
     left: 50%;
-
-    width: 23px;
+    display: block;
+    width: 22px;
     height: 2px;
-
     border-radius: 999px;
     background: #ffffff;
   }
 
-  .public-mobile-menu-close
+  .public-mobile-nav-sheet
+  button.public-mobile-menu-close
   span:first-child {
-    transform:
-      translate(-50%, -50%)
-      rotate(45deg);
+    transform: translate(-50%, -50%) rotate(45deg);
   }
 
-  .public-mobile-menu-close
+  .public-mobile-nav-sheet
+  button.public-mobile-menu-close
   span:last-child {
-    transform:
-      translate(-50%, -50%)
-      rotate(-45deg);
+    transform: translate(-50%, -50%) rotate(-45deg);
   }
 
-  .public-mobile-menu-close:hover {
-    opacity: 0.72;
-  }
-
-  .public-mobile-menu-close:focus-visible {
-    outline: 2px solid
-      rgba(255, 255, 255, 0.9);
-    outline-offset: 1px;
-    border-radius: 8px;
+  .public-mobile-nav-sheet
+  button.public-mobile-menu-close:focus-visible {
+    outline: 2px solid rgba(255, 255, 255, 0.9);
+    outline-offset: 2px;
   }
 
   .public-mobile-sheet-links {

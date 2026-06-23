@@ -182,6 +182,9 @@ function UploadTeam() {
   const modeTrackRef = useRef(null);
   const [activeModeIndex, setActiveModeIndex] = useState(0);
 
+  const tournamentTrackRef = useRef(null);
+  const [activeTournamentIndex, setActiveTournamentIndex] = useState(0);
+
   const canChangeTournament = tournaments.length > 1;
   const canChangeMode = modes.length > 1;
   const canChangeSelection = canChangeTournament || canChangeMode;
@@ -392,6 +395,20 @@ function UploadTeam() {
   ]);
 
   useEffect(() => {
+    if (selectionModal === "tournament") {
+      setActiveTournamentIndex(0);
+
+      requestAnimationFrame(() => {
+        const track = tournamentTrackRef.current;
+
+        if (track) {
+          track.scrollLeft = 0;
+        }
+      });
+    }
+  }, [selectionModal, tournaments.length]);
+
+  useEffect(() => {
     if (
       selectionModal !== "mode" ||
       !modes.length
@@ -477,6 +494,49 @@ function UploadTeam() {
 
     setActiveModeIndex(closestIndex);
   }
+
+  const scrollToTournamentCard = (index) => {
+    const track = tournamentTrackRef.current;
+
+    if (!track) return;
+
+    const card = track.children[index];
+
+    if (!card) return;
+
+    card.scrollIntoView({
+      behavior: "smooth",
+      block: "nearest",
+      inline: "center",
+    });
+  };
+
+  const handleTournamentTrackScroll = () => {
+    const track = tournamentTrackRef.current;
+
+    if (!track || !track.children.length) {
+      return;
+    }
+
+    const trackRect = track.getBoundingClientRect();
+    const trackCenter = trackRect.left + trackRect.width / 2;
+
+    let nearestIndex = 0;
+    let nearestDistance = Infinity;
+
+    Array.from(track.children).forEach((card, index) => {
+      const cardRect = card.getBoundingClientRect();
+      const cardCenter = cardRect.left + cardRect.width / 2;
+      const distance = Math.abs(cardCenter - trackCenter);
+
+      if (distance < nearestDistance) {
+        nearestDistance = distance;
+        nearestIndex = index;
+      }
+    });
+
+    setActiveTournamentIndex(nearestIndex);
+  };
 
   const VALID_TYPES = new Set(["image/png", "image/jpeg", "image/webp"]);
 
@@ -785,7 +845,9 @@ function UploadTeam() {
             
             <div className="registration-tournament-carousel">
               <div
+                ref={tournamentTrackRef}
                 className="registration-tournament-track"
+                onScroll={handleTournamentTrackScroll}
               >
                 {tournaments.map((tournament) => {
                   const logoUrl =
@@ -878,9 +940,35 @@ function UploadTeam() {
             </div>
 
             {tournaments.length > 1 && (
-              <p className="registration-swipe-hint">
-                Swipe to browse tournaments
-              </p>
+              <>
+                <p className="registration-swipe-hint">
+                  Swipe to browse tournaments
+                </p>
+                <div
+                  className="registration-tournament-dots"
+                  aria-label="Tournament navigation"
+                >
+                  {tournaments.map((tournament, index) => (
+                    <button
+                      key={tournament.id}
+                      type="button"
+                      className={[
+                        "registration-tournament-dot",
+                        index === activeTournamentIndex ? "is-active" : "",
+                      ]
+                        .filter(Boolean)
+                        .join(" ")}
+                      onClick={() => scrollToTournamentCard(index)}
+                      aria-label={`View ${
+                        tournament.name || `tournament ${index + 1}`
+                      }`}
+                      aria-current={
+                        index === activeTournamentIndex ? "true" : undefined
+                      }
+                    />
+                  ))}
+                </div>
+              </>
             )}
 
             <div className="registration-selection-footer">

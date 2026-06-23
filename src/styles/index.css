@@ -1513,3 +1513,76 @@ h3 {
     transition: none;
   }
 }
+
+.registration-tournament-dots {
+  display: none;
+}
+
+@media (max-width: 720px) {
+  .registration-tournament-dots {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    margin: 14px 0 0;
+    gap: 9px;
+  }
+
+  .registration-selection-modal
+  .registration-tournament-dots
+  > button.registration-tournament-dot {
+    all: unset;
+    box-sizing: border-box;
+    display: block;
+    flex: 0 0 9px !important;
+    width: 9px !important;
+    height: 9px !important;
+    min-width: 9px !important;
+    min-height: 9px !important;
+    max-width: 9px !important;
+    max-height: 9px !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    border: 0 !important;
+    border-radius: 50% !important;
+    background: rgba(255, 255, 255, 0.26) !important;
+    box-shadow: none !important;
+    cursor: pointer;
+    transition: background-color 150ms ease, transform 150ms ease, box-shadow 150ms ease;
+  }
+
+  .registration-selection-modal
+  .registration-tournament-dots
+  > button.registration-tournament-dot:hover {
+    background: rgba(255, 255, 255, 0.52) !important;
+    transform: scale(1.12);
+  }
+
+  .registration-selection-modal
+  .registration-tournament-dots
+  > button.registration-tournament-dot.is-active {
+    flex-basis: 9px !important;
+    width: 9px !important;
+    height: 9px !important;
+    min-width: 9px !important;
+    min-height: 9px !important;
+    max-width: 9px !important;
+    max-height: 9px !important;
+    border-radius: 50% !important;
+    background: #ef343a !important;
+    box-shadow: 0 0 7px rgba(239, 52, 58, 0.45) !important;
+    transform: scale(1.08);
+  }
+
+  .registration-selection-modal
+  .registration-tournament-dots
+  > button.registration-tournament-dot:focus-visible {
+    outline: 2px solid rgba(255, 255, 255, 0.92);
+    outline-offset: 3px;
+  }
+
+  .registration-tournament-dots
+  + .registration-selection-footer {
+    margin-top: 16px;
+  }
+}
