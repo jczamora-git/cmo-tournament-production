@@ -170,6 +170,9 @@ function UploadTeam() {
 
   const [tournaments, setTournaments] = useState([]);
   const [modes, setModes] = useState([]);
+  const [modesLoading, setModesLoading] = useState(false);
+  const [modesLoadError, setModesLoadError] = useState("");
+  const [modesReloadKey, setModesReloadKey] = useState(0);
   const [selectedTournament, setSelectedTournament] = useState(null);
   const [selectedMode, setSelectedMode] = useState(null);
 
@@ -255,53 +258,138 @@ function UploadTeam() {
 
   useEffect(() => {
     let isMounted = true;
-    if (form.tournament_id) {
-      fetch(apiUrl(`/api/tournaments/${form.tournament_id}/modes`), { cache: "no-store" })
-        .then(res => res.json())
-        .then((data) => {
-          if (!isMounted) return;
-          const uploadModes = (data || []).filter(
-            (m) => isDatabaseTrue(m.is_active) && isDatabaseTrue(m.team_upload_enabled) && String(m.tournament_id) === form.tournament_id
+
+    if (!form.tournament_id) {
+      setModes([]);
+      setModesLoading(false);
+      setModesLoadError("");
+      return () => {
+        isMounted = false;
+      };
+    }
+
+    setModesLoading(true);
+    setModesLoadError("");
+    setModes([]);
+
+    fetch(
+      apiUrl(
+        `/api/tournaments/${form.tournament_id}/modes`
+      ),
+      {
+        cache: "no-store",
+      }
+    )
+      .then((res) => {
+        if (!res.ok) {
+          throw new Error(
+            `Unable to load divisions: ${res.status}`
           );
-          setModes(uploadModes);
+        }
 
-          if (!form.tournament_mode_id) {
-            const mParam = searchParams.get("mode");
-            let foundMode = null;
-            if (mParam) {
-              foundMode = uploadModes.find((m) => String(m.id) === mParam);
-              if (!foundMode) {
-                const newParams = new URLSearchParams(searchParams);
-                newParams.delete("mode");
-                setSearchParams(newParams, { replace: true });
-              }
-            }
+        return res.json();
+      })
+      .then((data) => {
+        if (!isMounted) return;
 
-            if (!foundMode && uploadModes.length === 1) {
-              foundMode = uploadModes[0];
-            }
+        const uploadModes = (data || []).filter(
+          (mode) =>
+            isDatabaseTrue(mode.is_active) &&
+            isDatabaseTrue(
+              mode.team_upload_enabled
+            ) &&
+            String(mode.tournament_id) ===
+              String(form.tournament_id)
+        );
 
-            if (foundMode) {
-              setSelectedMode(foundMode);
-              setForm((prev) => ({ ...prev, tournament_mode_id: String(foundMode.id) }));
-              const newParams = new URLSearchParams(searchParams);
-              newParams.set("mode", foundMode.id);
-              setSearchParams(newParams, { replace: true });
-            } else if (uploadModes.length > 1) {
-              setSelectionModal("mode");
-            } else {
-              setSelectionModal(null);
+        setModes(uploadModes);
+
+        if (!form.tournament_mode_id) {
+          const modeParam =
+            searchParams.get("mode");
+
+          let foundMode = null;
+
+          if (modeParam) {
+            foundMode = uploadModes.find(
+              (mode) =>
+                String(mode.id) === modeParam
+            );
+
+            if (!foundMode) {
+              const nextParams =
+                new URLSearchParams(
+                  searchParams
+                );
+
+              nextParams.delete("mode");
+
+              setSearchParams(nextParams, {
+                replace: true,
+              });
             }
           }
-        })
-        .catch(() => {
-          if (!isMounted) return;
-          setModes([]);
-          setSelectionModal(null);
-        });
-    }
-    return () => { isMounted = false; };
-  }, [form.tournament_id]);
+
+          if (
+            !foundMode &&
+            uploadModes.length === 1
+          ) {
+            foundMode = uploadModes[0];
+          }
+
+          if (foundMode) {
+            setSelectedMode(foundMode);
+
+            setForm((current) => ({
+              ...current,
+              tournament_mode_id:
+                String(foundMode.id),
+            }));
+
+            const nextParams =
+              new URLSearchParams(searchParams);
+
+            nextParams.set(
+              "mode",
+              foundMode.id
+            );
+
+            setSearchParams(nextParams, {
+              replace: true,
+            });
+
+            setSelectionModal(null);
+          } else if (
+            uploadModes.length > 1
+          ) {
+            setSelectionModal("mode");
+          } else {
+            setSelectionModal(null);
+          }
+        }
+      })
+      .catch(() => {
+        if (!isMounted) return;
+
+        setModes([]);
+        setSelectionModal(null);
+        setModesLoadError(
+          "We could not load the available divisions. Please try again."
+        );
+      })
+      .finally(() => {
+        if (isMounted) {
+          setModesLoading(false);
+        }
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [
+    form.tournament_id,
+    modesReloadKey,
+  ]);
 
   useEffect(() => {
     if (
@@ -629,21 +717,49 @@ function UploadTeam() {
   }
 
   const selectionComplete = Boolean(selectedTournament) && Boolean(selectedMode) && Boolean(form.tournament_id) && Boolean(form.tournament_mode_id);
-  const noModesAvailable = selectedTournament && modes.length === 0 && !settingsLoading;
-  const showBlankStateFallback = !loading && !selectionModal && !selectedMode && tournaments.length > 0 && selectionInitialized && !noModesAvailable && !selectionComplete;
+  const noModesAvailable =
+    Boolean(selectedTournament) &&
+    !modesLoading &&
+    !modesLoadError &&
+    modes.length === 0;
+  const showBlankStateFallback =
+    !loading &&
+    !modesLoading &&
+    !modesLoadError &&
+    !selectionModal &&
+    !selectedMode &&
+    tournaments.length > 0 &&
+    selectionInitialized &&
+    !noModesAvailable &&
+    !selectionComplete;
 
   const changeSelectionLabel = canChangeTournament ? "Change Tournament / Division" : canChangeMode ? "Change Division" : null;
 
+  const registrationModeLabel = String(
+    selectedMode?.code ||
+    selectedMode?.name ||
+    ""
+  )
+    .replaceAll("_", " ")
+    .trim();
+
+  const registrationTournamentLabel = selectedTournament
+    ? selectedTournament.name
+    : "";
+
+  const registrationSubtitle =
+    registrationTournamentLabel &&
+    registrationModeLabel
+      ? `Submit your squad for ${registrationTournamentLabel} — ${registrationModeLabel} Division.`
+      : "Submit your squad for the selected tournament division.";
+
   return (
     <div className="ph-section team-upload-page">
-      <div className="ph-section-header">
-        <div className="ph-hero-badges" style={{ marginBottom: "16px" }}>
-          <span className="ph-hero-season">Team Registration</span>
-          <span className="ph-hero-season" style={{ background: "rgba(220, 38, 38, 0.12)", color: "#fca5a5", borderColor: "rgba(220, 38, 38, 0.2)" }}>Admin Review Required</span>
-        </div>
-        <h2>Upload Team</h2>
-        <p>Submit your squad for the current tournament.</p>
-      </div>
+      <section className="registration-page-heading">
+        <h1>Register Team</h1>
+
+        <p>{registrationSubtitle}</p>
+      </section>
 
       {selectionModal === "tournament" && (
         <div className="ph-modal-backdrop">
@@ -920,6 +1036,79 @@ function UploadTeam() {
         </div>
       )}
 
+      {selectedTournament &&
+        modesLoading &&
+        !selectionModal && (
+          <div
+            className="
+              ph-card
+              registration-loading-state
+            "
+            role="status"
+            aria-live="polite"
+          >
+            <div
+              className="
+                registration-loading-spinner
+              "
+              aria-hidden="true"
+            />
+
+            <h3>Loading Divisions</h3>
+
+            <p>
+              Checking the available registration
+              divisions for this tournament.
+            </p>
+          </div>
+        )}
+
+      {selectedTournament &&
+        !modesLoading &&
+        modesLoadError &&
+        !selectionModal && (
+          <div
+            className="
+              ph-card
+              registration-load-error
+            "
+            role="alert"
+          >
+            <div
+              className="
+                registration-state-icon
+              "
+              aria-hidden="true"
+            >
+              !
+            </div>
+
+            <h3>Unable to Load Divisions</h3>
+
+            <p>{modesLoadError}</p>
+
+            <button
+              type="button"
+              className="ph-btn ph-btn-primary"
+              onClick={() =>
+                setModesReloadKey(
+                  (current) => current + 1
+                )
+              }
+            >
+              Try Again
+            </button>
+
+            <button
+              type="button"
+              className="ph-btn ph-btn-secondary"
+              onClick={() => navigate("/")}
+            >
+              Back to Home
+            </button>
+          </div>
+        )}
+
       {noModesAvailable && !selectionModal && (
         <div className="registration-empty-state">
           <div style={{ fontSize: "32px", marginBottom: "1rem" }}>⚠️</div>
@@ -956,22 +1145,31 @@ function UploadTeam() {
       {selectionComplete && (
         <div className="team-registration-card">
           <div className="registration-selection-summary">
-            <div className="registration-selection-summary-details">
-              <p style={{ fontSize: "0.75rem", textTransform: "uppercase", letterSpacing: "0.05em", color: "#8899a6", marginBottom: "4px" }}>Registering For</p>
-              <h3>{selectedTournament.name}</h3>
-              <p>{selectedMode?.name || selectedMode?.code || "Mode"}</p>
-              <p style={{ fontSize: "0.75rem", marginTop: "4px" }}>
+            <div className="registration-selection-copy">
+              <span className="registration-selection-eyebrow">
+                Registering for
+              </span>
+
+              <strong className="registration-selection-title">
+                {registrationTournamentLabel}
+              </strong>
+
+              <span className="registration-selection-meta">
                 {selectedTournament?.game_type || "Tournament"}
-                {selectedMode?.code ? ` • ${selectedMode.code}` : ""}
-              </p>
+                {" · "}
+                {registrationModeLabel}
+              </span>
             </div>
-            <div className="registration-selection-summary-actions">
-              {changeSelectionLabel && (
-                <button type="button" className="ph-btn ph-btn-secondary" style={{ padding: "8px 12px", fontSize: "0.85rem", minHeight: "36px" }} onClick={handleChangeSelection}>
-                  {changeSelectionLabel}
-                </button>
-              )}
-            </div>
+
+            {changeSelectionLabel && (
+              <button
+                type="button"
+                className="registration-selection-change"
+                onClick={handleChangeSelection}
+              >
+                Change
+              </button>
+            )}
           </div>
 
           <form onSubmit={handleSubmit}>
