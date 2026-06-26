@@ -9,7 +9,10 @@ function toPostgresSql(sql) {
 }
 
 async function runQuery(client, sql, params = []) {
-  const text = toPostgresSql(sql);
+  let text = toPostgresSql(sql);
+  if (text.trim().toUpperCase().startsWith("INSERT") && !text.toUpperCase().includes("RETURNING")) {
+    text += " RETURNING id";
+  }
   const result = await client.query(text, params);
   const meta = {
     affectedRows: result.rowCount || 0,

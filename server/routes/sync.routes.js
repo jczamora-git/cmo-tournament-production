@@ -23,7 +23,7 @@ router.get("/tournaments", async (req, res) => {
       params.push(tId);
     }
 
-    sql += ` ORDER BY start_date DESC NULLS LAST, id DESC`;
+    sql += ` ORDER BY CASE WHEN start_date IS NULL THEN 1 ELSE 0 END ASC, start_date DESC, id DESC`;
 
     const [rows] = await db.query(sql, params);
     res.json({ success: true, data: rows });
@@ -97,12 +97,60 @@ router.get("/teams", async (req, res) => {
     const [rows] = await db.query(sql, params);
 
     if (tId && mId && rows.length === 0) {
-      // Mismatch check not strictly required on result if handled above, but good practice
+      const [check] = await db.query(`SELECT id FROM tournament_modes WHERE id = ? AND tournament_id != ?`, [mId, tId]);
+      if (check.length > 0) {
+        return res.status(400).json({ success: false, code: "CONTEXT_MISMATCH", message: "Mode does not belong to the given tournament" });
+      }
     }
 
     res.json({ success: true, data: rows });
   } catch (error) {
     console.error("[sync-api] /teams error:", error.message);
+    res.status(500).json({ success: false, code: "DATABASE_ERROR", message: "Database error" });
+  }
+});
+
+// 8. GET /api/sync/players
+router.get("/players", async (req, res) => {
+  try {
+    let sql = `SELECT p.id, p.team_id, p.ign, p.role, p.photo, p.is_active, p.created_at, p.updated_at 
+               FROM players p
+               JOIN teams t ON p.team_id = t.id
+               WHERE 1=1`;
+    const params = [];
+
+    const tId = parsePositiveInt(req.query.tournament_id);
+    const mId = parsePositiveInt(req.query.tournament_mode_id);
+    const teamId = parsePositiveInt(req.query.team_id);
+
+    if (tId) {
+      sql += ` AND t.tournament_id = ?`;
+      params.push(tId);
+    }
+    if (mId) {
+      sql += ` AND t.tournament_mode_id = ?`;
+      params.push(mId);
+      if (!tId) {
+        return res.status(400).json({ success: false, code: "MISSING_CONTEXT", message: "tournament_id is required when tournament_mode_id is provided" });
+      }
+    }
+    if (teamId) {
+      sql += ` AND p.team_id = ?`;
+      params.push(teamId);
+    }
+
+    const [rows] = await db.query(sql, params);
+
+    if (tId && mId && rows.length === 0) {
+      const [check] = await db.query(`SELECT id FROM tournament_modes WHERE id = ? AND tournament_id != ?`, [mId, tId]);
+      if (check.length > 0) {
+        return res.status(400).json({ success: false, code: "CONTEXT_MISMATCH", message: "Mode does not belong to the given tournament" });
+      }
+    }
+
+    res.json({ success: true, data: rows });
+  } catch (error) {
+    console.error("[sync-api] /players error:", error.message);
     res.status(500).json({ success: false, code: "DATABASE_ERROR", message: "Database error" });
   }
 });
@@ -120,6 +168,9 @@ router.post("/matches", async (req, res) => {
     blue_score,
     red_score,
     status,
+    series_completed,
+    series_winner_team_id,
+    series_completed_at,
     queue_order
   } = req.body;
 
@@ -176,8 +227,8 @@ router.post("/matches", async (req, res) => {
 
     await connection.beginTransaction();
     const insertSql = `
-      INSERT INTO matches (match_no, blue_team_id, red_team_id, mode, title, queue_order, blue_score, red_score, status, tournament_id, tournament_mode_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id
+      INSERT INTO matches (match_no, blue_team_id, red_team_id, mode, title, queue_order, blue_score, red_score, status, series_completed, series_winner_team_id, series_completed_at, tournament_id, tournament_mode_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
     const params = [
       parsePositiveInt(match_no) || 1,
@@ -189,6 +240,9 @@ router.post("/matches", async (req, res) => {
       parsePositiveInt(blue_score) || 0,
       parsePositiveInt(red_score) || 0,
       status || "queued",
+      series_completed === true ? 1 : 0,
+      parsePositiveInt(series_winner_team_id) || null,
+      series_completed_at || null,
       tId,
       mId
     ];
@@ -224,6 +278,7 @@ router.put("/matches/:id", async (req, res) => {
   const allowList = [
     "match_no", "blue_team_id", "red_team_id", "mode", "title",
     "queue_order", "blue_score", "red_score", "status",
+    "series_completed", "series_winner_team_id", "series_completed_at",
     "tournament_id", "tournament_mode_id"
   ];
 
@@ -252,6 +307,138 @@ router.put("/matches/:id", async (req, res) => {
     res.json({ success: true, id: matchId, data: { id: matchId } });
   } catch (error) {
     console.error("[sync-api] /matches/:id PUT error:", error.message);
+    res.status(500).json({ success: false, code: "DATABASE_ERROR", message: "Database error" });
+  }
+});
+
+// 11. POST /api/sync/games
+router.post("/games", async (req, res) => {
+  const { match_id, game_no, winner_team_id, status, finished_at } = req.body;
+
+  const mId = parsePositiveInt(match_id);
+  const gNo = parsePositiveInt(game_no);
+
+  if (!mId || !gNo) {
+    return res.status(400).json({ success: false, code: "VALIDATION_ERROR", message: "Valid match_id and game_no are required" });
+  }
+
+  const validStatuses = ["queued", "active", "live", "finished", "cancelled"];
+  if (status && !validStatuses.includes(status)) {
+    return res.status(400).json({ success: false, code: "VALIDATION_ERROR", message: "Invalid status" });
+  }
+
+  const connection = await db.getConnection();
+  try {
+    const [matchRows] = await connection.query(`SELECT id, blue_team_id, red_team_id FROM matches WHERE id = ?`, [mId]);
+    if (matchRows.length === 0) {
+      connection.release();
+      return res.status(404).json({ success: false, code: "NOT_FOUND", message: "Match not found" });
+    }
+    const match = matchRows[0];
+
+    const wId = parsePositiveInt(winner_team_id);
+    if (wId) {
+      // For head-to-head, winner must be one of the teams
+      if (match.blue_team_id && match.red_team_id) {
+        if (wId !== match.blue_team_id && wId !== match.red_team_id) {
+          connection.release();
+          return res.status(400).json({ success: false, code: "VALIDATION_ERROR", message: "Winner must be one of the match teams" });
+        }
+      } else {
+        // Just verify team exists
+        const [teamRows] = await connection.query(`SELECT id FROM teams WHERE id = ?`, [wId]);
+        if (teamRows.length === 0) {
+          connection.release();
+          return res.status(400).json({ success: false, code: "VALIDATION_ERROR", message: "Winner team does not exist" });
+        }
+      }
+    }
+
+    await connection.beginTransaction();
+    const insertSql = `
+      INSERT INTO games (match_id, game_no, winner_team_id, status, finished_at)
+      VALUES (?, ?, ?, ?, ?)
+    `;
+    const params = [
+      mId,
+      gNo,
+      wId || null,
+      status || "queued",
+      finished_at || null
+    ];
+
+    let result, meta;
+    try {
+      [result, meta] = await connection.query(insertSql, params);
+    } catch (dbErr) {
+      if (dbErr.code === 'ER_DUP_ENTRY' || dbErr.message.includes('unique constraint') || dbErr.message.includes('Duplicate entry')) {
+        await connection.rollback();
+        connection.release();
+        return res.status(409).json({ success: false, code: "DUPLICATE_GAME", message: "Game already exists for this match and number" });
+      }
+      throw dbErr;
+    }
+
+    const newId = meta.insertId || (result[0] && result[0].id);
+    await connection.commit();
+    connection.release();
+
+    console.log(`[sync-api] game created id=${newId} match=${mId} no=${gNo}`);
+    res.json({ success: true, id: newId, data: { id: newId } });
+  } catch (error) {
+    if (connection) {
+      await connection.rollback();
+      connection.release();
+    }
+    console.error("[sync-api] /games POST error:", error.message);
+    res.status(500).json({ success: false, code: "DATABASE_ERROR", message: "Database error" });
+  }
+});
+
+// 12. PUT /api/sync/games/:id
+router.put("/games/:id", async (req, res) => {
+  const gameId = parsePositiveInt(req.params.id);
+  if (!gameId) return res.status(400).json({ success: false, code: "VALIDATION_ERROR", message: "Invalid game ID" });
+
+  const body = req.body;
+  const updates = [];
+  const params = [];
+
+  // Match ID should generally not be changed, but allowList can support it if needed
+  const allowList = ["game_no", "winner_team_id", "status", "finished_at"];
+
+  for (const field of allowList) {
+    if (body[field] !== undefined) {
+      updates.push(`${field} = ?`);
+      if (field === "winner_team_id" || field === "game_no") {
+        params.push(parsePositiveInt(body[field]) || null);
+      } else {
+        params.push(body[field]);
+      }
+    }
+  }
+
+  if (updates.length === 0) {
+    return res.json({ success: true, id: gameId, data: { id: gameId } });
+  }
+
+  updates.push(`updated_at = NOW()`);
+  params.push(gameId);
+
+  const sql = `UPDATE games SET ${updates.join(", ")} WHERE id = ?`;
+
+  try {
+    const [result, meta] = await db.query(sql, params);
+    if (meta.affectedRows === 0) {
+      return res.status(404).json({ success: false, code: "NOT_FOUND", message: "Game not found" });
+    }
+    console.log(`[sync-api] game updated id=${gameId}`);
+    res.json({ success: true, id: gameId, data: { id: gameId } });
+  } catch (error) {
+    if (error.code === 'ER_DUP_ENTRY' || error.message.includes('unique constraint') || error.message.includes('Duplicate entry')) {
+      return res.status(409).json({ success: false, code: "DUPLICATE_GAME", message: "Game already exists for this match and number" });
+    }
+    console.error("[sync-api] /games/:id PUT error:", error.message);
     res.status(500).json({ success: false, code: "DATABASE_ERROR", message: "Database error" });
   }
 });

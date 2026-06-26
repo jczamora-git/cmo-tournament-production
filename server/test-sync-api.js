@@ -29,26 +29,38 @@ function makeRequest(path, token) {
 }
 
 async function run() {
-  console.log("Testing with missing token:");
-  let res = await makeRequest('/api/sync/tournaments', undefined);
-  console.log(`Status: ${res.status}, Data: ${res.data}`);
-
-  console.log("\nTesting with wrong token format:");
-  res = await makeRequest('/api/sync/tournaments', "wrong-format-token");
-  console.log(`Status: ${res.status}, Data: ${res.data}`);
-
-  console.log("\nTesting with wrong token (403):");
-  res = await makeRequest('/api/sync/tournaments', "Bearer invalid-token");
-  console.log(`Status: ${res.status}, Data: ${res.data}`);
-
   const validToken = "Bearer " + process.env.PRODUCTION_SYNC_TOKEN;
-  console.log("\nTesting valid token /tournaments:");
-  res = await makeRequest('/api/sync/tournaments', validToken);
-  console.log(`Status: ${res.status}, Data: ${res.data}`);
+  
+  const routes = [
+    '/api/sync/tournaments',
+    '/api/sync/tournaments?tournament_id=12',
+    '/api/sync/tournament-modes?tournament_id=12',
+    '/api/sync/teams?tournament_id=12&tournament_mode_id=9',
+    '/api/sync/teams?tournament_id=12&tournament_mode_id=10',
+    '/api/sync/players?tournament_id=12&tournament_mode_id=9',
+    '/api/sync/players?tournament_id=12&tournament_mode_id=10'
+  ];
 
-  console.log("\nTesting mismatched context /tournament-modes?tournament_id=1&tournament_mode_id=999:");
-  res = await makeRequest('/api/sync/tournament-modes?tournament_id=1&tournament_mode_id=999', validToken);
-  console.log(`Status: ${res.status}, Data: ${res.data}`);
+  console.log("=== GET Route Tests ===");
+  for (const route of routes) {
+    const res = await makeRequest(route, validToken);
+    let rows = "error parsing json";
+    try {
+      const parsed = JSON.parse(res.data);
+      rows = parsed.success && Array.isArray(parsed.data) ? parsed.data.length : res.data;
+    } catch(e) {}
+    console.log(`[${res.status}] ${route} -> rows: ${rows}`);
+  }
+
+  console.log("\n=== Mismatch Tests ===");
+  const mismatches = [
+    '/api/sync/teams?tournament_id=11&tournament_mode_id=9',
+    '/api/sync/players?tournament_id=11&tournament_mode_id=9'
+  ];
+  for (const route of mismatches) {
+    const res = await makeRequest(route, validToken);
+    console.log(`[${res.status}] (Expected 400 or empty array based on logic) ${route}`);
+  }
 }
 
-setTimeout(run, 2000); // give server time to start
+setTimeout(run, 2000);

@@ -53,10 +53,36 @@ CREATE TABLE IF NOT EXISTS matches (
   blue_score INT DEFAULT 0,
   red_score INT DEFAULT 0,
   status VARCHAR(50) DEFAULT 'queued',
+  series_completed SMALLINT DEFAULT 0,
+  series_winner_team_id BIGINT DEFAULT NULL REFERENCES teams(id) ON DELETE SET NULL,
+  series_completed_at TIMESTAMP DEFAULT NULL,
   tournament_id INTEGER DEFAULT NULL REFERENCES tournaments(id) ON DELETE SET NULL,
   tournament_mode_id INTEGER DEFAULT NULL REFERENCES tournament_modes(id) ON DELETE SET NULL,
   created_at TIMESTAMP DEFAULT NOW(),
   updated_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS players (
+  id SERIAL PRIMARY KEY,
+  team_id BIGINT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+  ign VARCHAR(255) NOT NULL,
+  role VARCHAR(50) DEFAULT NULL,
+  photo VARCHAR(500) DEFAULT NULL,
+  is_active BOOLEAN DEFAULT true,
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS games (
+  id SERIAL PRIMARY KEY,
+  match_id BIGINT NOT NULL REFERENCES matches(id) ON DELETE CASCADE,
+  game_no INTEGER NOT NULL,
+  winner_team_id BIGINT DEFAULT NULL REFERENCES teams(id) ON DELETE SET NULL,
+  status VARCHAR(50) DEFAULT 'queued',
+  finished_at TIMESTAMP DEFAULT NULL,
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW(),
+  UNIQUE(match_id, game_no)
 );
 
 CREATE TABLE IF NOT EXISTS team_submissions (
