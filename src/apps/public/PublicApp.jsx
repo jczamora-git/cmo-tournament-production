@@ -1,8 +1,8 @@
-import { Routes, Route } from "react-router-dom";
+import { Routes, Route, Navigate } from "react-router-dom";
 import PublicTopNav from "./components/PublicTopNav";
 import PublicHome from "./pages/PublicHome";
 import UploadTeam from "./pages/UploadTeam";
-import ViewMatches from "./pages/ViewMatches";
+import ViewSchedule from "./pages/ViewSchedule";
 import ViewHistory from "./pages/ViewHistory";
 import ViewBracket from "./pages/ViewBracket";
 import WatchLive from "./pages/WatchLive";
@@ -19,7 +19,8 @@ function PublicApp() {
           <Route path="/tournaments" element={<ViewTournaments />} />
           <Route path="/videos" element={<ViewVideos />} />
           <Route path="/upload-team" element={<UploadTeam />} />
-          <Route path="/matches" element={<ViewMatches />} />
+          <Route path="/schedule" element={<ViewSchedule />} />
+          <Route path="/matches" element={<Navigate to="/schedule" replace />} />
           <Route path="/history" element={<ViewHistory />} />
           <Route path="/bracket" element={<ViewBracket />} />
           <Route path="/live" element={<WatchLive />} />

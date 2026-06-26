@@ -3,11 +3,25 @@ const db = require("../db");
 
 const router = express.Router();
 
+const MATCHES_SELECT = `
+  SELECT 
+    m.*,
+    blue_team.name AS blue_team_name,
+    blue_team.shortname AS blue_team_shortname,
+    blue_team.logo AS blue_team_logo,
+    red_team.name AS red_team_name,
+    red_team.shortname AS red_team_shortname,
+    red_team.logo AS red_team_logo
+  FROM matches m
+  LEFT JOIN teams AS blue_team ON blue_team.id = m.blue_team_id
+  LEFT JOIN teams AS red_team ON red_team.id = m.red_team_id
+`;
+
 // Public: read-only match endpoints
 router.get("/", async (req, res) => {
   try {
     const [rows] = await db.query(
-      "SELECT * FROM matches ORDER BY COALESCE(queue_order, 999999) ASC, id ASC"
+      `${MATCHES_SELECT} ORDER BY COALESCE(m.queue_order, 999999) ASC, m.id ASC`
     );
     res.json(rows);
   } catch (error) {
@@ -19,7 +33,7 @@ router.get("/", async (req, res) => {
 router.get("/upcoming", async (req, res) => {
   try {
     const [rows] = await db.query(
-      "SELECT * FROM matches WHERE LOWER(status) IN ('queued', 'upcoming', 'scheduled') ORDER BY COALESCE(queue_order, 999999) ASC, id ASC"
+      `${MATCHES_SELECT} WHERE LOWER(m.status) IN ('queued', 'upcoming', 'scheduled') ORDER BY COALESCE(m.queue_order, 999999) ASC, m.id ASC`
     );
     res.json(rows);
   } catch (error) {
@@ -31,7 +45,7 @@ router.get("/upcoming", async (req, res) => {
 router.get("/history", async (req, res) => {
   try {
     const [rows] = await db.query(
-      "SELECT * FROM matches WHERE LOWER(status) IN ('finished', 'done', 'completed') ORDER BY updated_at DESC, id DESC"
+      `${MATCHES_SELECT} WHERE LOWER(m.status) IN ('finished', 'done', 'completed') ORDER BY m.updated_at DESC, m.id DESC`
     );
     res.json(rows);
   } catch (error) {
@@ -43,17 +57,33 @@ router.get("/history", async (req, res) => {
 router.get("/bracket", async (req, res) => {
   try {
     const [rows] = await db.query(
-      "SELECT * FROM matches ORDER BY COALESCE(queue_order, 999999) ASC, id ASC"
+      `${MATCHES_SELECT} ORDER BY COALESCE(m.queue_order, 999999) ASC, m.id ASC`
     );
 
-    const [teams] = await db.query("SELECT id, name, shortname, logo FROM teams");
-    const teamMap = Object.fromEntries(teams.map((t) => [t.id, t]));
+    // Preserve the nested object contract for bracket endpoint
+    const bracket = rows.map((match) => {
+      const {
+        blue_team_name, blue_team_shortname, blue_team_logo,
+        red_team_name, red_team_shortname, red_team_logo,
+        ...rest
+      } = match;
 
-    const bracket = rows.map((match) => ({
-      ...match,
-      blue_team: teamMap[match.blue_team_id] || null,
-      red_team: teamMap[match.red_team_id] || null,
-    }));
+      return {
+        ...match, // keep flat fields for compatibility
+        blue_team: match.blue_team_id ? {
+          id: match.blue_team_id,
+          name: blue_team_name,
+          shortname: blue_team_shortname,
+          logo: blue_team_logo,
+        } : null,
+        red_team: match.red_team_id ? {
+          id: match.red_team_id,
+          name: red_team_name,
+          shortname: red_team_shortname,
+          logo: red_team_logo,
+        } : null,
+      };
+    });
 
     res.json(bracket);
   } catch (error) {

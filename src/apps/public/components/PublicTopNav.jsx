@@ -13,7 +13,7 @@ const navItems = [
   { to: "/tournaments", label: "Tournaments" },
   { to: "/videos", label: "Videos" },
   { to: "/upload-team", label: "Upload Team" },
-  { to: "/matches", label: "Matches" },
+  { to: "/schedule", label: "Schedule" },
   { to: "/history", label: "History" },
   { to: "/bracket", label: "Bracket" },
   { to: "/live", label: "Watch Live" },
