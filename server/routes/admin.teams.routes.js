@@ -65,7 +65,7 @@ router.get("/", async (req, res) => {
 
 router.post("/", uploadTeamLogo.single("logo"), async (req, res) => {
   try {
-    const { name, shortname, logo, tournament_id, tournament_mode_id } = req.body;
+    const { name, shortname, captain_name, contact, logo, tournament_id, tournament_mode_id } = req.body;
     if (!name) {
       return res.status(400).json({ message: "Team name is required" });
     }
@@ -113,10 +113,10 @@ router.post("/", uploadTeamLogo.single("logo"), async (req, res) => {
 
     const insertSql =
       db.client === "postgres"
-        ? "INSERT INTO teams (name, shortname, logo, tournament_id, tournament_mode_id) VALUES (?,?,?,?,?) RETURNING id"
-        : "INSERT INTO teams (name, shortname, logo, tournament_id, tournament_mode_id) VALUES (?,?,?,?,?)";
+        ? "INSERT INTO teams (name, shortname, captain_name, contact, logo, tournament_id, tournament_mode_id) VALUES (?,?,?,?,?,?,?) RETURNING id"
+        : "INSERT INTO teams (name, shortname, captain_name, contact, logo, tournament_id, tournament_mode_id) VALUES (?,?,?,?,?,?,?)";
     
-    const queryResult = await db.query(insertSql, [name, shortname || null, logoPath, tournament_id, tournament_mode_id]);
+    const queryResult = await db.query(insertSql, [name, shortname || null, captain_name || null, contact || null, logoPath, tournament_id, tournament_mode_id]);
     const insertedId = getInsertedId(queryResult, db.client);
 
     if (!insertedId) {
@@ -159,7 +159,7 @@ router.post("/", uploadTeamLogo.single("logo"), async (req, res) => {
 router.put("/:id", uploadTeamLogo.single("logo"), async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, shortname, logo, tournament_id, tournament_mode_id } = req.body;
+    const { name, shortname, captain_name, contact, logo, tournament_id, tournament_mode_id } = req.body;
 
     // Validate tournament/mode relationship if provided
     if (tournament_id && tournament_mode_id) {
@@ -204,8 +204,8 @@ router.put("/:id", uploadTeamLogo.single("logo"), async (req, res) => {
     const finalModeId = tournament_mode_id !== undefined ? (tournament_mode_id || null) : existing.tournament_mode_id;
 
     await db.query(
-      "UPDATE teams SET name = ?, shortname = ?, logo = ?, tournament_id = ?, tournament_mode_id = ? WHERE id = ?",
-      [name, shortname || null, nextLogo, finalTournamentId, finalModeId, id]
+      "UPDATE teams SET name = ?, shortname = ?, captain_name = ?, contact = ?, logo = ?, tournament_id = ?, tournament_mode_id = ? WHERE id = ?",
+      [name, shortname || null, captain_name || null, contact || null, nextLogo, finalTournamentId, finalModeId, id]
     );
 
     res.json({ id: Number(id), name, shortname: shortname || null, logo: nextLogo, tournament_id: finalTournamentId, tournament_mode_id: finalModeId });

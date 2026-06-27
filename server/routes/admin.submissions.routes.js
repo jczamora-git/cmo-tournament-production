@@ -83,6 +83,8 @@ router.put("/:id/approve", async (req, res) => {
 
     const finalName = team_name || submission.team_name;
     const finalShortname = shortname !== undefined ? shortname : submission.shortname;
+    const finalCaptain = captain_name !== undefined ? captain_name : submission.captain_name;
+    const finalContact = contact !== undefined ? contact : submission.contact;
     const finalLogo = logo_url !== undefined ? logo_url : submission.logo_url;
     const finalTournamentId = submission.tournament_id || null;
     const finalModeId = submission.tournament_mode_id || null;
@@ -100,14 +102,14 @@ router.put("/:id/approve", async (req, res) => {
     let teamId;
     if (db.client === "postgres") {
       const [teamRows] = await conn.query(
-        "INSERT INTO teams (name, shortname, logo, tournament_id, tournament_mode_id) VALUES (?,?,?,?,?) RETURNING id",
-        [finalName, finalShortname || null, finalLogo || null, finalTournamentId, finalModeId]
+        "INSERT INTO teams (name, shortname, captain_name, contact, logo, tournament_id, tournament_mode_id) VALUES (?,?,?,?,?,?,?) RETURNING id",
+        [finalName, finalShortname || null, finalCaptain || null, finalContact || null, finalLogo || null, finalTournamentId, finalModeId]
       );
       teamId = teamRows[0].id;
     } else {
       const [, result] = await conn.query(
-        "INSERT INTO teams (name, shortname, logo, tournament_id, tournament_mode_id) VALUES (?,?,?,?,?)",
-        [finalName, finalShortname || null, finalLogo || null, finalTournamentId, finalModeId]
+        "INSERT INTO teams (name, shortname, captain_name, contact, logo, tournament_id, tournament_mode_id) VALUES (?,?,?,?,?,?,?)",
+        [finalName, finalShortname || null, finalCaptain || null, finalContact || null, finalLogo || null, finalTournamentId, finalModeId]
       );
       teamId = result.insertId;
     }

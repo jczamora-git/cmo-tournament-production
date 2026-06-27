@@ -14,6 +14,8 @@ function ManageTeams() {
   const [editingId, setEditingId] = useState(null);
   const [name, setName] = useState("");
   const [shortname, setShortname] = useState("");
+  const [captainName, setCaptainName] = useState("");
+  const [contact, setContact] = useState("");
   const [logoUrl, setLogoUrl] = useState("");
   const [tournamentId, setTournamentId] = useState("");
   const [modeId, setModeId] = useState("");
@@ -76,6 +78,8 @@ function ManageTeams() {
   const resetForm = () => {
     setName("");
     setShortname("");
+    setCaptainName("");
+    setContact("");
     setLogoUrl("");
     setTournamentId("");
     setModeId("");
@@ -94,6 +98,8 @@ function ManageTeams() {
     setEditingId(team.id);
     setName(team.name);
     setShortname(team.shortname || "");
+    setCaptainName(team.captain_name || "");
+    setContact(team.contact || "");
     setLogoUrl(team.logo || "");
     setTournamentId(team.tournament_id ? String(team.tournament_id) : "");
     setModeId(team.tournament_mode_id ? String(team.tournament_mode_id) : "");
@@ -135,6 +141,8 @@ function ManageTeams() {
       const payload = {
         name: name.trim(),
         shortname: shortname.trim() || null,
+        captain_name: captainName.trim() || null,
+        contact: contact.trim() || null,
         logo: logoUrl.trim() || null,
       };
       if (tournamentId) payload.tournament_id = Number(tournamentId);
@@ -230,37 +238,74 @@ function ManageTeams() {
           </button>
         </EmptyState>
       ) : (
-        <div className="admin-team-grid">
-          {teams.map((team) => (
-            <div key={team.id} className="admin-team-card">
-              {team.logo ? (
-                <img src={team.logo} alt={team.name} className="admin-team-logo" />
-              ) : (
-                <div className="admin-team-logo-fallback">
-                  {(team.shortname || team.name)?.[0] || "?"}
-                </div>
-              )}
-              <div className="admin-team-info">
-                <span className="admin-team-name">{team.name}</span>
-                {team.shortname && (
-                  <span className="admin-team-shortname">{team.shortname}</span>
-                )}
-                <span style={{ fontSize: "11px", color: "var(--jz-text-soft)", marginTop: "2px" }}>
-                  {team.tournament_name
-                    ? `${team.tournament_name} — ${team.mode_name || "—"}`
-                    : "Unassigned / Legacy"}
-                </span>
-              </div>
-              <div className="admin-team-actions">
-                <button type="button" className="button-ghost button-compact" onClick={() => openEdit(team)}>
-                  Edit
-                </button>
-                <button type="button" className="button-danger-outline button-compact" onClick={() => setDeleteTarget(team)}>
-                  Delete
-                </button>
-              </div>
-            </div>
-          ))}
+        <div className="admin-table-container">
+          <table className="admin-teams-table">
+            <thead>
+              <tr>
+                <th className="th-number">#</th>
+                <th className="th-team">Team</th>
+                <th className="th-shortname">Shortname</th>
+                <th className="th-captain">Captain</th>
+                <th className="th-mode">Mode</th>
+                <th className="th-actions">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {teams.map((team, index) => {
+                const modeText = team.mode_code || team.mode_name || team.tournament_mode_id || "—";
+                const modeLower = String(modeText).toLowerCase();
+                let badgeClass = "mode-default";
+                if (modeLower.includes("mp") || modeLower.includes("multiplayer")) badgeClass = "mode-mp";
+                else if (modeLower.includes("br") || modeLower.includes("battle royale")) badgeClass = "mode-br";
+                else if (modeLower.includes("moba")) badgeClass = "mode-moba";
+                else if (modeLower.includes("magic chess") || modeLower.includes("mc")) badgeClass = "mode-mc";
+
+                return (
+                  <tr key={team.id}>
+                    <td className="td-number">
+                      <span className="admin-table-td-label">#</span>
+                      {index + 1}
+                    </td>
+                    <td className="td-team">
+                      <span className="admin-table-td-label">Team</span>
+                      {team.logo ? (
+                        <img src={team.logo} alt={team.name} className="td-team-logo" />
+                      ) : (
+                        <div className="td-team-logo-fallback">
+                          {(team.shortname || team.name)?.[0]?.toUpperCase() || "?"}
+                        </div>
+                      )}
+                      <span>{team.name}</span>
+                    </td>
+                    <td className="td-shortname">
+                      <span className="admin-table-td-label">Shortname</span>
+                      {team.shortname || "—"}
+                    </td>
+                    <td className="td-captain">
+                      <span className="admin-table-td-label">Captain</span>
+                      {team.captain_name || "—"}
+                    </td>
+                    <td className="td-mode">
+                      <span className="admin-table-td-label">Mode</span>
+                      <span className={`admin-mode-badge ${badgeClass}`}>
+                        {modeText}
+                      </span>
+                    </td>
+                    <td className="td-actions">
+                      <div className="admin-team-actions">
+                        <button type="button" className="button-ghost button-compact" onClick={() => openEdit(team)}>
+                          Edit
+                        </button>
+                        <button type="button" className="button-danger-outline button-compact" onClick={() => setDeleteTarget(team)}>
+                          Delete
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
         </div>
       )}
 
@@ -325,6 +370,26 @@ function ManageTeams() {
                       value={logoUrl}
                       onChange={(e) => setLogoUrl(e.target.value)}
                       placeholder="https://example.com/logo.png"
+                    />
+                  </div>
+                </div>
+                <div className="admin-form-row">
+                  <div className="form-group">
+                    <label>Captain Name</label>
+                    <input
+                      type="text"
+                      value={captainName}
+                      onChange={(e) => setCaptainName(e.target.value)}
+                      placeholder="Optional"
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label>Contact</label>
+                    <input
+                      type="text"
+                      value={contact}
+                      onChange={(e) => setContact(e.target.value)}
+                      placeholder="Optional"
                     />
                   </div>
                 </div>

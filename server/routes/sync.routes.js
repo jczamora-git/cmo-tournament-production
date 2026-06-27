@@ -74,7 +74,7 @@ router.get("/tournament-modes", async (req, res) => {
 // 7. GET /api/sync/teams
 router.get("/teams", async (req, res) => {
   try {
-    let sql = `SELECT id, name, shortname, logo, tournament_id, tournament_mode_id, created_at, updated_at FROM teams WHERE 1=1`;
+    let sql = `SELECT id, name, shortname, captain_name, contact, logo, tournament_id, tournament_mode_id, created_at, updated_at FROM teams WHERE 1=1`;
     const params = [];
 
     const tId = parsePositiveInt(req.query.tournament_id);

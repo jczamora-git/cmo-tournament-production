@@ -1965,3 +1965,182 @@
     max-width: none;
   }
 }
+
+/* ── Standings Table ─────────────────────────────────────── */
+.admin-table-container {
+  background: linear-gradient(180deg, rgba(18, 24, 36, 0.96), rgba(10, 14, 22, 0.96));
+  border: 1px solid var(--jz-border);
+  border-radius: var(--jz-radius-lg);
+  box-shadow: var(--jz-shadow), var(--jz-red-glow);
+  overflow-x: auto;
+  margin-top: 16px;
+}
+
+.admin-teams-table {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+}
+
+.admin-teams-table th {
+  padding: 16px 20px;
+  font-size: 13px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--jz-text-muted);
+  background: rgba(255, 255, 255, 0.02);
+  border-bottom: 1px solid rgba(220, 38, 38, 0.15);
+}
+
+.admin-teams-table td {
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--jz-border);
+  vertical-align: middle;
+}
+
+.admin-teams-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.admin-teams-table tbody tr:nth-child(even) {
+  background: rgba(255, 255, 255, 0.015);
+}
+
+.admin-teams-table tbody tr:hover {
+  background: rgba(220, 38, 38, 0.04);
+}
+
+.admin-teams-table .th-number { width: 60px; text-align: center; }
+.admin-teams-table .td-number { text-align: center; font-weight: 800; color: var(--jz-text-soft); }
+
+.admin-teams-table .td-team {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-weight: 700;
+  color: var(--jz-text-main);
+}
+
+.admin-teams-table .td-team-logo,
+.admin-teams-table .td-team-logo-fallback {
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  flex: 0 0 auto;
+  object-fit: contain;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--jz-border);
+}
+
+.admin-teams-table .td-team-logo-fallback {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 900;
+  font-size: 16px;
+  color: var(--jz-text-muted);
+  background: rgba(148, 163, 184, 0.12);
+}
+
+.admin-teams-table .td-shortname { color: var(--jz-text-muted); font-size: 14px; }
+
+.admin-teams-table .td-tournament { font-weight: 600; font-size: 14px; }
+
+.admin-teams-table .td-actions {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.admin-teams-table .td-actions .admin-team-actions {
+  display: inline-flex;
+  gap: 8px;
+}
+
+/* Badges */
+.admin-mode-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 800;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+
+.admin-mode-badge.mode-mp {
+  background: rgba(220, 38, 38, 0.12);
+  border-color: rgba(220, 38, 38, 0.28);
+  color: #fca5a5;
+}
+
+.admin-mode-badge.mode-br {
+  background: rgba(217, 119, 6, 0.12);
+  border-color: rgba(217, 119, 6, 0.28);
+  color: #fcd34d;
+}
+
+.admin-mode-badge.mode-moba {
+  background: rgba(59, 130, 246, 0.12);
+  border-color: rgba(59, 130, 246, 0.28);
+  color: #93c5fd;
+}
+
+.admin-mode-badge.mode-mc {
+  background: rgba(168, 85, 247, 0.12);
+  border-color: rgba(168, 85, 247, 0.28);
+  color: #d8b4fe;
+}
+
+.admin-mode-badge.mode-default {
+  background: rgba(148, 163, 184, 0.12);
+  border-color: rgba(148, 163, 184, 0.28);
+  color: #cbd5e1;
+}
+
+/* Responsive Table */
+@media (max-width: 768px) {
+  .admin-teams-table thead {
+    display: none;
+  }
+  .admin-teams-table tbody tr {
+    display: flex;
+    flex-direction: column;
+    padding: 16px;
+    border-bottom: 1px solid var(--jz-border);
+  }
+  .admin-teams-table td {
+    display: block;
+    padding: 6px 0;
+    border: none;
+    text-align: left;
+  }
+  .admin-teams-table .td-number {
+    display: inline-block;
+    background: rgba(255,255,255,0.05);
+    padding: 2px 8px;
+    border-radius: 4px;
+    margin-bottom: 8px;
+    font-size: 12px;
+  }
+  .admin-teams-table .td-actions {
+    text-align: left;
+    margin-top: 12px;
+  }
+  .admin-teams-table .td-actions .admin-team-actions {
+    justify-content: flex-start;
+  }
+  .admin-table-td-label {
+    display: inline-block;
+    width: 90px;
+    font-size: 12px;
+    color: var(--jz-text-muted);
+    font-weight: 700;
+  }
+}
+@media (min-width: 769px) {
+  .admin-table-td-label {
+    display: none;
+  }
+}
