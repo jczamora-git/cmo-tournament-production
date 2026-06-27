@@ -27,12 +27,10 @@ function ViewHistory() {
 
   return (
     <div>
-      <div className="admin-page-header">
-        <div className="admin-page-title-group">
-          <h1>Match History</h1>
-          <p className="admin-page-subtitle">Past match results.</p>
-        </div>
-      </div>
+      <header className="public-page-header">
+        <h1>Match History</h1>
+        <p>Review results and statistics from completed matches.</p>
+      </header>
 
       {matches.length === 0 ? (
         <EmptyState

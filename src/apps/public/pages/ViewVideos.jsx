@@ -44,10 +44,10 @@ function ViewVideos() {
 
   return (
     <div>
-      <div className="admin-page-header" style={{ flexWrap: "wrap", gap: "16px" }}>
-        <div className="admin-page-title-group">
+      <header className="public-page-header" style={{ flexWrap: "wrap", gap: "16px", display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+        <div>
           <h1>Video Archives</h1>
-          <p className="admin-page-subtitle">Watch replays, highlights, and live broadcasts.</p>
+          <p>Watch replays, highlights, and live broadcasts.</p>
         </div>
         <div style={{ minWidth: "250px" }}>
           <select value={selectedTournament} onChange={handleFilterChange} style={{ width: "100%", padding: "10px", borderRadius: "8px", backgroundColor: "var(--jz-bg-card)", border: "1px solid var(--jz-border)", color: "var(--jz-text-main)" }}>
@@ -57,7 +57,7 @@ function ViewVideos() {
             ))}
           </select>
         </div>
-      </div>
+      </header>
 
       {filteredVideos.length === 0 ? (
         <EmptyState icon="🎬" title="No videos available" description="There are no published videos for this selection." />

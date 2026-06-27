@@ -21,11 +21,25 @@ const navItems = [
 
 function PublicTopNav() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [isScrolled, setIsScrolled] = useState(false);
   const location = useLocation();
 
   useEffect(() => {
     setMobileMenuOpen(false);
   }, [location.pathname]);
+
+  useEffect(() => {
+    const handleScroll = () => {
+      setIsScrolled(window.scrollY > 60);
+    };
+
+    handleScroll();
+    window.addEventListener("scroll", handleScroll, { passive: true });
+
+    return () => {
+      window.removeEventListener("scroll", handleScroll);
+    };
+  }, []);
 
   useEffect(() => {
     if (!mobileMenuOpen) {
@@ -49,13 +63,16 @@ function PublicTopNav() {
     };
   }, [mobileMenuOpen]);
 
+  const isHome = location.pathname === "/";
+
   return (
     <>
       <header
-        className="
-          admin-topnav
-          public-topnav
-        "
+        className={[
+          "admin-topnav",
+          "public-topnav",
+          isHome && !isScrolled ? "is-transparent" : "is-scrolled",
+        ].filter(Boolean).join(" ")}
       >
         <div className="admin-topnav-inner">
           <NavLink to="/" className="admin-brand">
@@ -80,7 +97,7 @@ function PublicTopNav() {
 
           <button
             type="button"
-            className="public-mobile-menu-toggle"
+            className="public-nav-menu-toggle"
             aria-label="Open navigation menu"
             aria-expanded={mobileMenuOpen}
             aria-controls="public-mobile-nav-sheet"

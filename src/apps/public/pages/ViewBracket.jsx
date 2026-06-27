@@ -27,12 +27,10 @@ function ViewBracket() {
 
   return (
     <div>
-      <div className="admin-page-header">
-        <div className="admin-page-title-group">
-          <h1>Tournament Bracket</h1>
-          <p className="admin-page-subtitle">Full tournament bracket view.</p>
-        </div>
-      </div>
+      <header className="public-page-header">
+        <h1>Bracket</h1>
+        <p>View the current tournament bracket and progression.</p>
+      </header>
 
       {bracket.length === 0 ? (
         <EmptyState

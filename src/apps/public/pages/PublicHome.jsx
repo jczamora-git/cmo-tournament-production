@@ -128,97 +128,159 @@ function PublicHome() {
 
   const heroStyle = coverUrl
     ? {
-        backgroundImage: `linear-gradient(180deg, rgba(5,7,11,0.72) 0%, rgba(5,7,11,0.92) 100%), url(${coverUrl})`,
+        backgroundImage: [
+          "linear-gradient(to bottom, rgba(5,7,11,0.30) 0%, rgba(5,7,11,0.55) 45%, rgba(5,7,11,0.88) 78%, rgba(5,7,11,1) 100%)",
+          "linear-gradient(to right, rgba(180,10,10,0.18) 0%, transparent 60%)",
+          `url(${coverUrl})`,
+        ].join(", "),
         backgroundSize: "cover",
-        backgroundPosition: "center",
+        backgroundPosition: "center center",
+        backgroundRepeat: "no-repeat",
       }
     : undefined;
 
   if (loading) {
     return (
-      <div>
-        <section className="ph-hero">
-          <span className="ph-hero-eyebrow">Jeizi Productions Tournament</span>
-          <h1 style={{ opacity: 0.4 }}>Loading...</h1>
-        </section>
-      </div>
+      <section className="ph-hero">
+        <div className="ph-hero__content">
+          <div className="ph-hero__copy">
+            <h1 className="ph-hero__title" style={{ opacity: 0.3 }}>Loading...</h1>
+          </div>
+        </div>
+      </section>
     );
   }
 
   return (
     <div>
-      {/* Hero Section */}
+      {/* ── Hero ── */}
       <section className="ph-hero" style={heroStyle}>
-        {logoUrl && (
-          <img src={logoUrl} alt="" className="ph-hero-logo" />
-        )}
-        <span className="ph-hero-eyebrow">Jeizi Productions Tournament</span>
-        <h1>{featured?.name || "Jeizi Productions Tournament"}</h1>
-        <p className="ph-hero-subtitle">
-          {featured?.description || "Official tournament portal by Jeizi Productions."}
-        </p>
-        {featured && (
-          <div className="ph-hero-badges">
-            <span className="ph-featured-game">{featured.game_type}</span>
-            <span className="ph-featured-status">{featured.status.toUpperCase()}</span>
-            {featured.season && <span className="ph-hero-season">{featured.season}</span>}
+        <div className="ph-hero__content">
+          <div className="ph-hero__copy">
+            {featured && (
+              <p className="ph-hero__meta">
+                {[featured.game_type, featured.season, featured.status?.toUpperCase()]
+                  .filter(Boolean)
+                  .join("  ·  ")}
+              </p>
+            )}
+
+            <div className="ph-hero__title-row">
+              {logoUrl && (
+                <img
+                  src={logoUrl}
+                  alt={featured?.name || "Tournament logo"}
+                  className="ph-hero__logo"
+                />
+              )}
+              <h1 className="ph-hero__title">
+                {featured?.name || "Jeizi Productions Tournament"}
+              </h1>
+            </div>
+
+            <p className="ph-hero__desc">
+              {featured?.description || "Official tournament portal by Jeizi Productions."}
+            </p>
+            <div className="ph-hero__actions">
+              <Link to="/schedule" className="ph-hero__btn-primary">
+                View Schedule
+              </Link>
+              <div className="ph-hero__secondary-links">
+                {uploadEnabled ? (
+                  <Link to={uploadUrl} className="ph-hero__link">
+                    Register Team
+                  </Link>
+                ) : (
+                  <span className="ph-hero__link ph-hero__link--disabled">
+                    Registration Closed
+                  </span>
+                )}
+                <span className="ph-hero__link-sep">·</span>
+                <Link to="/live" className="ph-hero__link">
+                  Watch Live
+                </Link>
+              </div>
+            </div>
           </div>
-        )}
-        <div className="ph-hero-actions">
-          {uploadEnabled ? (
-            <Link to={uploadUrl} className="ph-btn ph-btn-primary">
-              Upload Team
-            </Link>
-          ) : (
-            <Link to="/upload-team" className="ph-btn ph-btn-secondary" style={{ opacity: 0.7 }}>
-              Registration Closed
-            </Link>
-          )}
-          <Link to="/live" className="ph-btn ph-btn-blue">
-            Watch Live
-          </Link>
-          <Link to="/matches" className="ph-btn ph-btn-secondary">
-            View Matches
-          </Link>
         </div>
       </section>
 
-      {/* Featured Tournament */}
-      {featured && (
-        <section className="ph-section">
-          <div className="ph-section-header">
-            <h2>Featured Tournament</h2>
-            <p>The current active tournament event.</p>
-          </div>
-          <div className="ph-featured">
-            <div className="ph-featured-top">
-              {logoUrl && (
-                <img src={logoUrl} alt="" style={{ width: "36px", height: "36px", borderRadius: "8px", objectFit: "contain", border: "1px solid rgba(148,163,184,0.16)" }} />
-              )}
-              <span className="ph-featured-game">{featured.game_type}</span>
-              <span className="ph-featured-status">{featured.status.toUpperCase()}</span>
-              {featured.season && <span className="ph-hero-season">{featured.season}</span>}
+      {/* ── Non-hero page content ── */}
+      <div className="public-page-content">
+        {/* ── Tournament Information Sections ── */}
+        {featured && (
+          <div className="ph-info-sections">
+            {/* Quick Status Bar */}
+            <div className="ph-quick-status">
+              <div className="ph-status-item">
+                <span className="ph-status-label">Registration</span>
+                <span className="ph-status-value" style={{ color: uploadEnabled ? "#4ade80" : "#94a3b8" }}>
+                  {uploadEnabled ? "Open" : "Closed"}
+                </span>
+              </div>
+              <div className="ph-status-item">
+                <span className="ph-status-label">Tournament</span>
+                <span className="ph-status-value">{featured.status === "ongoing" ? "In Progress" : featured.status === "upcoming" ? "Upcoming" : "Completed"}</span>
+              </div>
+              <div className="ph-status-item">
+                <span className="ph-status-label">Live Broadcast</span>
+                <span className="ph-status-value">Check Schedule</span>
+              </div>
             </div>
-            <h3>{featured.name}</h3>
-            <p className="ph-featured-desc">
-              {featured.description || "Official tournament portal by Jeizi Productions."}
-            </p>
-            <div className="ph-featured-actions">
-              <Link to={`/videos?tournament=${featured.id}`} className="ph-btn ph-btn-secondary">
-                View Videos &rarr;
-              </Link>
-              <Link to="/tournaments" className="ph-btn ph-btn-secondary">
-                View Tournament
-              </Link>
-              {uploadEnabled && (
-                <Link to={uploadUrl} className="ph-btn ph-btn-primary">
-                  Upload Team
-                </Link>
-              )}
-            </div>
+
+            {/* Tournament Overview */}
+            <section className="ph-section ph-overview-section">
+              <div className="ph-overview-grid">
+                <div className="ph-overview-left">
+                  <h2 className="ph-section-title">About the Tournament</h2>
+                  <p className="ph-overview-desc">
+                    {featured.description || "The official tournament portal by Jeizi Productions."}
+                  </p>
+                </div>
+                <div className="ph-overview-right">
+                  <div className="ph-overview-details">
+                    <div className="ph-detail-row">
+                      <span className="ph-detail-label">Game</span>
+                      <span className="ph-detail-value">{featured.game_type || "—"}</span>
+                    </div>
+                    <div className="ph-detail-row">
+                      <span className="ph-detail-label">Season</span>
+                      <span className="ph-detail-value">{featured.season || "—"}</span>
+                    </div>
+                    <div className="ph-detail-row">
+                      <span className="ph-detail-label">Status</span>
+                      <span className="ph-detail-value" style={{ textTransform: "capitalize" }}>{featured.status || "—"}</span>
+                    </div>
+                    {(featured.start_date || featured.end_date) && (
+                      <div className="ph-detail-row">
+                        <span className="ph-detail-label">Dates</span>
+                        <span className="ph-detail-value">
+                          {featured.start_date ? new Date(featured.start_date).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : ""}
+                          {featured.end_date ? ` – ${new Date(featured.end_date).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}` : ""}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </section>
+            
+            {/* Tournament Divisions / Modes */}
+            {featured.modes && featured.modes.length > 0 && (
+              <section className="ph-section ph-modes-section">
+                <h2 className="ph-section-title" style={{ marginBottom: "24px" }}>Tournament Divisions</h2>
+                <div className="ph-modes-grid">
+                  {featured.modes.map((mode) => (
+                    <div key={mode.id || mode.code} className="ph-mode-card">
+                      <h3 className="ph-mode-name">{mode.name}</h3>
+                      <p className="ph-mode-type">{mode.competition_type === 'team' ? 'Team Competition' : 'Individual Competition'}</p>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            )}
           </div>
-        </section>
-      )}
+        )}
 
       {/* Active & Recent Tournaments */}
       {tournaments.length > 0 && (
@@ -316,6 +378,8 @@ function PublicHome() {
           {uploadEnabled ? "Submit Your Team" : "Registration Closed"}
         </button>
       </section>
+
+      </div>
 
       {/* Registration Modal */}
       {showModal && eligibleTournaments.length > 0 && <RegistrationModal onClose={dismissModal} uploadUrl={uploadUrl} tournament={eligibleTournaments.length === 1 ? eligibleTournaments[0] : featured} />}

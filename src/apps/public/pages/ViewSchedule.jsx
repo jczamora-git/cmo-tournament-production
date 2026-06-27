@@ -60,12 +60,10 @@ function ViewSchedule() {
 
   return (
     <div>
-      <div className="admin-page-header">
-        <div className="admin-page-title-group">
-          <h1>Schedule</h1>
-          <p className="admin-page-subtitle">View current and upcoming tournament matches grouped by stage.</p>
-        </div>
-      </div>
+      <header className="public-page-header">
+        <h1>Schedule</h1>
+        <p>View current and upcoming tournament matches grouped by stage.</p>
+      </header>
 
       {matches.length === 0 ? (
         <EmptyState

@@ -24,12 +24,10 @@ function WatchLive() {
 
   return (
     <div>
-      <div className="admin-page-header">
-        <div className="admin-page-title-group">
-          <h1>Watch Live</h1>
-          <p className="admin-page-subtitle">Jeizi Productions Tournament Live Broadcast</p>
-        </div>
-      </div>
+      <header className="public-page-header">
+        <h1>Watch Live</h1>
+        <p>Current live broadcasts and upcoming streams.</p>
+      </header>
 
       <div className="admin-dashboard-chips" style={{ marginBottom: "24px" }}>
         <span>Facebook Live</span>

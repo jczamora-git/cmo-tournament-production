@@ -21,17 +21,15 @@ function ViewTournaments() {
 
   return (
     <div>
-      <div className="admin-page-header">
-        <div className="admin-page-title-group">
-          <h1>Tournaments</h1>
-          <p className="admin-page-subtitle">Browse all official esports tournaments.</p>
-        </div>
-      </div>
+      <header className="public-page-header">
+        <h1>Tournaments</h1>
+        <p>Browse all official esports tournaments.</p>
+      </header>
 
       {tournaments.length === 0 ? (
         <EmptyState icon="🏆" title="No tournaments available" description="Check back later for upcoming events." />
       ) : (
-        <div className="admin-overview-grid">
+        <div className="tournaments-grid">
           {tournaments.map((t) => {
             const coverUrl = t.cover_image_url || t.banner_url;
             const logoUrl = t.logo_image_url || t.logo_url;
