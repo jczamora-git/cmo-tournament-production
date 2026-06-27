@@ -30,7 +30,9 @@ router.get("/", async (req, res) => {
     const { tournament_id, tournament_mode_id } = req.query;
 
     let query = `
-      SELECT t.*,
+      SELECT 
+        t.id, t.name, t.shortname, t.captain_name, t.contact, t.logo, 
+        t.tournament_id, t.tournament_mode_id, t.created_at, t.updated_at,
         tn.name AS tournament_name,
         tm.name AS mode_name,
         tm.code AS mode_code
