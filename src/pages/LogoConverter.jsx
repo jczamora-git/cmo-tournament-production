@@ -14,22 +14,23 @@ const getFullImageUrl = (path) => {
 /**
  * LogoConverter Component
  * 
- * Normalizes team logos to a perfect 1:1 square ratio with smart centering logic,
- * then uploads and replaces the team's logo in the cloud/database directly.
- * 
- * Props:
- * - team: Optional team object. If passed, it locks to this team.
- * - onComplete: Optional callback triggered after successful upload and save.
- * - onClose: Optional callback to close the modal.
+ * Normalizes team logos to a perfect 1:1 square ratio with smart centering logic.
+ * Avoids CORS / Tainted Canvas issues by using a re-upload flow:
+ * 1. Shows the team's current cloud logo as a standard <img> element.
+ * 2. Requires a local file upload (drag & drop or click).
+ * 3. Once uploaded locally, draws on canvas without security restrictions, allowing customization and upload.
  */
 export default function LogoConverter({ team: propTeam, onComplete, onClose }) {
-  // If team is passed as prop, use it. Otherwise, allow selecting from all teams.
   const [teams, setTeams] = useState([]);
   const [selectedTeam, setSelectedTeam] = useState(propTeam || null);
   const [loadingTeams, setLoadingTeams] = useState(!propTeam);
   
-  const [imageSrc, setImageSrc] = useState(null);
+  // Image & upload states
+  const [imageSrc, setImageSrc] = useState(null); // Will hold the uploaded file data URL
+  const [isUploaded, setIsUploaded] = useState(false); // True when a local file is loaded
   const [fileName, setFileName] = useState("logo");
+  
+  // Customization parameters
   const [outputSize, setOutputSize] = useState(512); // Default size 512x512
   const [scale, setScale] = useState(0.9); // Scale factor (0.5 to 1.0)
   const [bgMode, setBgMode] = useState("detect"); // 'transparent', 'detect', 'custom'
@@ -38,9 +39,9 @@ export default function LogoConverter({ team: propTeam, onComplete, onClose }) {
   const [dragActive, setDragActive] = useState(false);
   const [imgElement, setImgElement] = useState(null);
   
-  // Loading & success states for upload
+  // Status & loading states
   const [uploading, setUploading] = useState(false);
-  const [statusMessage, setStatusMessage] = useState({ text: "", type: "" }); // type: 'success' | 'error' | 'info'
+  const [statusMessage, setStatusMessage] = useState({ text: "", type: "" }); // 'success' | 'error' | 'info'
 
   const canvasRef = useRef(null);
   const fileInputRef = useRef(null);
@@ -65,20 +66,13 @@ export default function LogoConverter({ team: propTeam, onComplete, onClose }) {
       });
   }, [propTeam]);
 
-  // Load existing logo as starting image if team has one
+  // Reset when team selection changes
   useEffect(() => {
-    if (selectedTeam?.logo) {
-      const fullUrl = getFullImageUrl(selectedTeam.logo);
-      setImageSrc(fullUrl);
-      setFileName(`${selectedTeam.name}_logo`);
-    } else {
-      setImageSrc(null);
-      setImgElement(null);
-      setFileName("logo");
-    }
+    setIsUploaded(false);
+    setImgElement(null);
+    setImageSrc(null);
     setStatusMessage({ text: "", type: "" });
   }, [selectedTeam]);
-
 
   // Helper to detect background color by sampling the corner pixels of the image
   const detectBackgroundColor = (img) => {
@@ -122,71 +116,27 @@ export default function LogoConverter({ team: propTeam, onComplete, onClose }) {
 
       return dominantColor;
     } catch (e) {
-      console.warn("Could not read canvas pixels (CORS restriction or empty image)", e);
+      console.warn("Could not read canvas pixels", e);
       return "#ffffff";
     }
   };
 
-  // Helper to load image as a Blob to prevent canvas tainting from cross-origin sources
-  const loadImageForCanvas = async (url) => {
-    if (url.startsWith("data:")) {
-      return new Promise((resolve, reject) => {
-        const img = new Image();
-        img.onload = () => resolve(img);
-        img.onerror = (e) => reject(e);
-        img.src = url;
-      });
-    }
-
-    try {
-      const response = await fetch(url);
-      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-      const blob = await response.blob();
-      const objectUrl = URL.createObjectURL(blob);
-      
-      return new Promise((resolve, reject) => {
-        const img = new Image();
-        img.onload = () => {
-          URL.revokeObjectURL(objectUrl);
-          resolve(img);
-        };
-        img.onerror = (e) => {
-          URL.revokeObjectURL(objectUrl);
-          reject(e);
-        };
-        img.src = objectUrl;
-      });
-    } catch (e) {
-      console.warn("Direct blob fetch failed, falling back to standard Image loading (canvas may be tainted):", e);
-      return new Promise((resolve, reject) => {
-        const img = new Image();
-        img.crossOrigin = "anonymous";
-        img.onload = () => resolve(img);
-        img.onerror = (err) => reject(err);
-        img.src = url;
-      });
-    }
-  };
-
-  // Load image when source changes
+  // Load uploaded image into Image object
   useEffect(() => {
-    if (!imageSrc) return;
+    if (!imageSrc || !isUploaded) return;
 
-    loadImageForCanvas(imageSrc)
-      .then((img) => {
-        setImgElement(img);
-        const detected = detectBackgroundColor(img);
-        setDetectedBgColor(detected);
-      })
-      .catch((err) => {
-        console.error("Failed to load image for canvas:", err);
-        setStatusMessage({ text: "Error loading logo image. Canvas may be tainted.", type: "error" });
-      });
-  }, [imageSrc]);
+    const img = new Image();
+    img.onload = () => {
+      setImgElement(img);
+      const detected = detectBackgroundColor(img);
+      setDetectedBgColor(detected);
+    };
+    img.src = imageSrc;
+  }, [imageSrc, isUploaded]);
 
-  // Redraw canvas whenever parameters or image changes
+  // Redraw canvas whenever parameters or image changes (only when local file is uploaded)
   useEffect(() => {
-    if (!canvasRef.current) return;
+    if (!canvasRef.current || !isUploaded || !imgElement) return;
     const canvas = canvasRef.current;
     const ctx = canvas.getContext("2d");
 
@@ -204,30 +154,28 @@ export default function LogoConverter({ team: propTeam, onComplete, onClose }) {
       ctx.fillRect(0, 0, outputSize, outputSize);
     }
 
-    // 2. Draw Image if loaded
-    if (imgElement) {
-      const imgWidth = imgElement.naturalWidth || imgElement.width;
-      const imgHeight = imgElement.naturalHeight || imgElement.height;
+    // 2. Draw Image
+    const imgWidth = imgElement.naturalWidth || imgElement.width;
+    const imgHeight = imgElement.naturalHeight || imgElement.height;
 
-      // Smart Centering Logic:
-      // Fit the image inside the target size * scale factor, maintaining aspect ratio.
-      const maxBoundingSize = outputSize * scale;
-      const widthRatio = maxBoundingSize / imgWidth;
-      const heightRatio = maxBoundingSize / imgHeight;
-      const finalScale = Math.min(widthRatio, heightRatio);
+    // Smart Centering Logic:
+    // Fit the image inside the target size * scale factor, maintaining aspect ratio.
+    const maxBoundingSize = outputSize * scale;
+    const widthRatio = maxBoundingSize / imgWidth;
+    const heightRatio = maxBoundingSize / imgHeight;
+    const finalScale = Math.min(widthRatio, heightRatio);
 
-      const drawWidth = imgWidth * finalScale;
-      const drawHeight = imgHeight * finalScale;
+    const drawWidth = imgWidth * finalScale;
+    const drawHeight = imgHeight * finalScale;
 
-      const x = (outputSize - drawWidth) / 2;
-      const y = (outputSize - drawHeight) / 2;
+    const x = (outputSize - drawWidth) / 2;
+    const y = (outputSize - drawHeight) / 2;
 
-      // Draw the image
-      ctx.drawImage(imgElement, x, y, drawWidth, drawHeight);
-    }
-  }, [imgElement, outputSize, scale, bgMode, customBgColor, detectedBgColor]);
+    // Draw the image (since it's a local object/data URL, this will never taint the canvas)
+    ctx.drawImage(imgElement, x, y, drawWidth, drawHeight);
+  }, [imgElement, outputSize, scale, bgMode, customBgColor, detectedBgColor, isUploaded]);
 
-  // Handle file selection
+  // Handle local file selection
   const handleFileChange = (e) => {
     const file = e.target.files?.[0];
     processFile(file);
@@ -247,6 +195,8 @@ export default function LogoConverter({ team: propTeam, onComplete, onClose }) {
     const reader = new FileReader();
     reader.onload = (e) => {
       setImageSrc(e.target.result);
+      setIsUploaded(true);
+      setStatusMessage({ text: "Logo loaded locally. Customization controls are now unlocked!", type: "info" });
     };
     reader.readAsDataURL(file);
   };
@@ -276,23 +226,23 @@ export default function LogoConverter({ team: propTeam, onComplete, onClose }) {
     fileInputRef.current?.click();
   };
 
-  // Upload/Save Converted Image to cloud storage & update db
+  // Upload/Save Converted Image
   const handleSaveAndUpload = async () => {
     if (!selectedTeam) {
       setStatusMessage({ text: "Please select a team first.", type: "error" });
       return;
     }
 
-    if (!canvasRef.current || !imageSrc) {
-      setStatusMessage({ text: "Please upload or provide a logo image.", type: "error" });
+    if (!canvasRef.current || !isUploaded) {
+      setStatusMessage({ text: "Please upload a logo file to convert.", type: "error" });
       return;
     }
 
     setUploading(true);
-    setStatusMessage({ text: "Processing & uploading normalized logo...", type: "info" });
+    setStatusMessage({ text: "Processing and uploading normalized logo...", type: "info" });
 
     try {
-      // 1. Convert Canvas to Blob
+      // 1. Convert Canvas to Blob (no tainting error, since the source was a local file upload)
       const blob = await new Promise((resolve) => {
         canvasRef.current.toBlob((b) => resolve(b), "image/png");
       });
@@ -302,7 +252,6 @@ export default function LogoConverter({ team: propTeam, onComplete, onClose }) {
       }
 
       // 2. Prepare Form Data containing team data + processed file
-      // Important: We must supply all required details, otherwise backend will set missing values to null!
       const formData = new FormData();
       formData.append("name", selectedTeam.name);
       if (selectedTeam.shortname) formData.append("shortname", selectedTeam.shortname);
@@ -311,13 +260,13 @@ export default function LogoConverter({ team: propTeam, onComplete, onClose }) {
       if (selectedTeam.tournament_id) formData.append("tournament_id", selectedTeam.tournament_id);
       if (selectedTeam.tournament_mode_id) formData.append("tournament_mode_id", selectedTeam.tournament_mode_id);
       
-      // Append the processed canvas file
+      // Append processed file
       formData.append("logo", blob, `${selectedTeam.name.toLowerCase().replace(/\s+/g, "_")}_1x1.png`);
 
-      // 3. Make PUT request to backend update API
+      // 3. Update database via API
       await adminUpdateTeam(selectedTeam.id, formData);
 
-      setStatusMessage({ text: "Logo normalized and successfully updated in storage/database!", type: "success" });
+      setStatusMessage({ text: "Logo normalized and successfully updated in database!", type: "success" });
       
       if (onComplete) {
         onComplete(selectedTeam.id);
@@ -443,6 +392,17 @@ export default function LogoConverter({ team: propTeam, onComplete, onClose }) {
           font-size: 1rem;
         }
 
+        .upload-instruction-card {
+          background: rgba(239, 68, 68, 0.05);
+          border: 1px dashed rgba(239, 68, 68, 0.25);
+          color: #f87171;
+          padding: 0.75rem 1rem;
+          border-radius: 8px;
+          font-size: 0.85rem;
+          text-align: center;
+          font-weight: 500;
+        }
+
         .upload-zone {
           border: 2px dashed rgba(255, 255, 255, 0.15);
           border-radius: 12px;
@@ -483,6 +443,12 @@ export default function LogoConverter({ team: propTeam, onComplete, onClose }) {
           display: flex;
           flex-direction: column;
           gap: 1.25rem;
+          transition: opacity 0.3s ease;
+        }
+
+        .config-card.disabled {
+          opacity: 0.4;
+          pointer-events: none;
         }
 
         .config-group {
@@ -611,7 +577,7 @@ export default function LogoConverter({ team: propTeam, onComplete, onClose }) {
           border: 1px solid rgba(255, 255, 255, 0.1);
         }
 
-        .preview-canvas {
+        .preview-canvas, .preview-image {
           max-width: 100%;
           max-height: 100%;
           object-fit: contain;
@@ -710,6 +676,13 @@ export default function LogoConverter({ team: propTeam, onComplete, onClose }) {
             )}
           </div>
 
+          {/* Upload Instructions Banner if original cloud image is shown */}
+          {!isUploaded && selectedTeam?.logo && (
+            <div className="upload-instruction-card">
+              ⚠️ To convert this logo, please re-upload the file below.
+            </div>
+          )}
+
           {/* Upload Area */}
           <div
             className={`upload-zone ${dragActive ? "drag-active" : ""}`}
@@ -741,21 +714,21 @@ export default function LogoConverter({ team: propTeam, onComplete, onClose }) {
               />
             </svg>
             <span className="upload-text">
-              {imageSrc ? (
+              {isUploaded ? (
                 <>
-                  Logo selected. Click or drag to replace.
+                  New logo loaded. Click or drag to replace.
                 </>
               ) : (
                 <>
-                  <strong>Drag & drop logo</strong> or <strong>click to upload</strong>
+                  <strong>Drag & drop logo file</strong> or <strong>click to upload</strong>
                 </>
               )}
               <p>Supports PNG, JPG, SVG, WebP</p>
             </span>
           </div>
 
-          {/* Configuration Card */}
-          <div className="config-card">
+          {/* Configuration Card - Disabled until a file is locally uploaded */}
+          <div className={`config-card ${!isUploaded ? "disabled" : ""}`}>
             {/* Output Size */}
             <div className="config-group">
               <span className="config-label">
@@ -810,8 +783,6 @@ export default function LogoConverter({ team: propTeam, onComplete, onClose }) {
                   type="button"
                   className={`toggle-btn ${bgMode === "detect" ? "active" : ""}`}
                   onClick={() => setBgMode("detect")}
-                  disabled={!imageSrc}
-                  style={!imageSrc ? { opacity: 0.5, cursor: "not-allowed" } : {}}
                 >
                   Match Image
                 </button>
@@ -844,12 +815,20 @@ export default function LogoConverter({ team: propTeam, onComplete, onClose }) {
         {/* Right Side: Preview & Sync Action */}
         <div className="preview-section">
           <div className="preview-container">
-            {imageSrc ? (
+            {isUploaded ? (
+              // Display HTML Canvas for the active local editing flow
               <canvas
                 ref={canvasRef}
                 width={outputSize}
                 height={outputSize}
                 className="preview-canvas"
+              />
+            ) : selectedTeam?.logo ? (
+              // Display a standard <img> element for the cloud logo (avoids canvas taint error)
+              <img
+                src={getFullImageUrl(selectedTeam.logo)}
+                alt={`${selectedTeam.name} Current Logo`}
+                className="preview-image"
               />
             ) : (
               <div className="preview-placeholder">
@@ -865,7 +844,7 @@ export default function LogoConverter({ team: propTeam, onComplete, onClose }) {
                   <circle cx="8.5" cy="8.5" r="1.5" />
                   <polyline points="21 15 16 10 5 21" />
                 </svg>
-                <span>Select a team or logo to preview</span>
+                <span>No logo uploaded yet</span>
               </div>
             )}
           </div>
@@ -873,7 +852,7 @@ export default function LogoConverter({ team: propTeam, onComplete, onClose }) {
           <button
             type="button"
             className="save-btn"
-            disabled={!selectedTeam || !imageSrc || uploading}
+            disabled={!selectedTeam || !isUploaded || uploading}
             onClick={handleSaveAndUpload}
           >
             {uploading ? (
@@ -889,7 +868,7 @@ export default function LogoConverter({ team: propTeam, onComplete, onClose }) {
                   <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                   <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
                 </svg>
-                <span>Uploading to Cloud...</span>
+                <span>Uploading...</span>
               </>
             ) : (
               <>
