@@ -127,30 +127,61 @@ export default function LogoConverter({ team: propTeam, onComplete, onClose }) {
     }
   };
 
+  // Helper to load image as a Blob to prevent canvas tainting from cross-origin sources
+  const loadImageForCanvas = async (url) => {
+    if (url.startsWith("data:")) {
+      return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => resolve(img);
+        img.onerror = (e) => reject(e);
+        img.src = url;
+      });
+    }
+
+    try {
+      const response = await fetch(url);
+      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+      const blob = await response.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      
+      return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => {
+          URL.revokeObjectURL(objectUrl);
+          resolve(img);
+        };
+        img.onerror = (e) => {
+          URL.revokeObjectURL(objectUrl);
+          reject(e);
+        };
+        img.src = objectUrl;
+      });
+    } catch (e) {
+      console.warn("Direct blob fetch failed, falling back to standard Image loading (canvas may be tainted):", e);
+      return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.crossOrigin = "anonymous";
+        img.onload = () => resolve(img);
+        img.onerror = (err) => reject(err);
+        img.src = url;
+      });
+    }
+  };
+
   // Load image when source changes
   useEffect(() => {
     if (!imageSrc) return;
 
-    const img = new Image();
-    img.crossOrigin = "anonymous";
-    img.onload = () => {
-      setImgElement(img);
-      const detected = detectBackgroundColor(img);
-      setDetectedBgColor(detected);
-    };
-    img.onerror = () => {
-      console.warn("CORS image loading failed. Retrying without CORS settings...");
-      // Try again without crossOrigin parameter (canvas will be tainted, but preview remains visible)
-      if (img.crossOrigin === "anonymous") {
-        const fallbackImg = new Image();
-        fallbackImg.onload = () => {
-          setImgElement(fallbackImg);
-          setDetectedBgColor("#ffffff"); // Default to white since we cannot read tainted canvas pixels
-        };
-        fallbackImg.src = imageSrc;
-      }
-    };
-    img.src = imageSrc;
+    loadImageForCanvas(imageSrc)
+      .then((img) => {
+        setImgElement(img);
+        const detected = detectBackgroundColor(img);
+        setDetectedBgColor(detected);
+      })
+      .catch((err) => {
+        console.error("Failed to load image for canvas:", err);
+        setStatusMessage({ text: "Error loading logo image. Canvas may be tainted.", type: "error" });
+      });
   }, [imageSrc]);
 
   // Redraw canvas whenever parameters or image changes
