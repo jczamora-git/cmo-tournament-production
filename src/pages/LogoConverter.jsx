@@ -1,5 +1,15 @@
 import React, { useState, useRef, useEffect } from "react";
 import { adminGetTeams, adminUpdateTeam } from "../services/api";
+import { apiUrl } from "../config/api";
+
+// Helper to get absolute image URL (resolving local relative paths to backend port in development)
+const getFullImageUrl = (path) => {
+  if (!path) return "";
+  if (path.startsWith("http://") || path.startsWith("https://") || path.startsWith("data:")) {
+    return path;
+  }
+  return apiUrl(path);
+};
 
 /**
  * LogoConverter Component
@@ -58,7 +68,8 @@ export default function LogoConverter({ team: propTeam, onComplete, onClose }) {
   // Load existing logo as starting image if team has one
   useEffect(() => {
     if (selectedTeam?.logo) {
-      setImageSrc(selectedTeam.logo);
+      const fullUrl = getFullImageUrl(selectedTeam.logo);
+      setImageSrc(fullUrl);
       setFileName(`${selectedTeam.name}_logo`);
     } else {
       setImageSrc(null);
@@ -67,6 +78,7 @@ export default function LogoConverter({ team: propTeam, onComplete, onClose }) {
     }
     setStatusMessage({ text: "", type: "" });
   }, [selectedTeam]);
+
 
   // Helper to detect background color by sampling the corner pixels of the image
   const detectBackgroundColor = (img) => {
@@ -125,6 +137,18 @@ export default function LogoConverter({ team: propTeam, onComplete, onClose }) {
       setImgElement(img);
       const detected = detectBackgroundColor(img);
       setDetectedBgColor(detected);
+    };
+    img.onerror = () => {
+      console.warn("CORS image loading failed. Retrying without CORS settings...");
+      // Try again without crossOrigin parameter (canvas will be tainted, but preview remains visible)
+      if (img.crossOrigin === "anonymous") {
+        const fallbackImg = new Image();
+        fallbackImg.onload = () => {
+          setImgElement(fallbackImg);
+          setDetectedBgColor("#ffffff"); // Default to white since we cannot read tainted canvas pixels
+        };
+        fallbackImg.src = imageSrc;
+      }
     };
     img.src = imageSrc;
   }, [imageSrc]);
