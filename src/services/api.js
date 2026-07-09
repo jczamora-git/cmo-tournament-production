@@ -98,6 +98,8 @@ export const adminUpdateTeam = (id, payload) =>
   adminRequest(`/admin/teams/${id}`, { method: "PUT", body: payload });
 export const adminDeleteTeam = (id) =>
   adminRequest(`/admin/teams/${id}`, { method: "DELETE" });
+export const adminNormalizeTeamLogo = (id, payload) =>
+  adminRequest(`/admin/teams/${id}/normalize-logo`, { method: "POST", body: payload });
 
 // Admin matches
 export const adminGetMatches = () => adminRequest("/admin/matches");

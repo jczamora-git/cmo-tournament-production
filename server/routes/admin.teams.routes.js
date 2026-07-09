@@ -233,4 +233,130 @@ router.delete("/:id", async (req, res) => {
   }
 });
 
+router.post("/:id/normalize-logo", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { resolution = 512, margin = 90, background = "transparent" } = req.body;
+
+    const [rows] = await db.query("SELECT * FROM teams WHERE id = ?", [id]);
+    if (!rows.length) {
+      return res.status(404).json({ message: "Team not found." });
+    }
+    
+    const team = rows[0];
+    if (!team.logo) {
+      return res.status(400).json({ message: "Team does not have a logo to normalize." });
+    }
+
+    const { localUploadsDir, uploadImage, storageDriver } = require("../services/storage");
+    const sharp = require("sharp");
+    const fs = require("fs");
+
+    // Resolve URL/path to buffer
+    let imageBuffer;
+    const logoUrl = team.logo;
+
+    if (logoUrl.startsWith("http://") || logoUrl.startsWith("https://")) {
+      const fetchResponse = await fetch(logoUrl);
+      if (!fetchResponse.ok) {
+        return res.status(400).json({ message: "Failed to download current team logo from storage." });
+      }
+      imageBuffer = Buffer.from(await fetchResponse.arrayBuffer());
+    } else {
+      // Relative path: e.g. /uploads/teams/filename.png
+      const filename = path.basename(logoUrl);
+      const localPath = path.join(localUploadsDir, "teams", filename);
+      if (!fs.existsSync(localPath)) {
+        return res.status(400).json({ message: `Local logo file not found at path: ${localPath}` });
+      }
+      imageBuffer = fs.readFileSync(localPath);
+    }
+
+    // Process image using sharp
+    const img = sharp(imageBuffer);
+    const metadata = await img.metadata();
+    const width = metadata.width;
+    const height = metadata.height;
+
+    // Calculate dimensions
+    const maxBoundingSize = resolution * (margin / 100);
+    const widthRatio = maxBoundingSize / width;
+    const heightRatio = maxBoundingSize / height;
+    const finalScale = Math.min(widthRatio, heightRatio);
+
+    const resizeWidth = Math.round(width * finalScale);
+    const resizeHeight = Math.round(height * finalScale);
+
+    const padLeft = Math.floor((resolution - resizeWidth) / 2);
+    const padTop = Math.floor((resolution - resizeHeight) / 2);
+    const padRight = resolution - resizeWidth - padLeft;
+    const padBottom = resolution - resizeHeight - padTop;
+
+    // Background color parsing
+    let bg = { r: 0, g: 0, b: 0, alpha: 0 };
+    if (background === "match") {
+      // Sample top-left corner pixel
+      const corner = await sharp(imageBuffer).extract({ left: 0, top: 0, width: 1, height: 1 }).raw().toBuffer();
+      const r = corner[0];
+      const g = corner[1];
+      const b = corner[2];
+      const a = corner[3];
+      if (a !== undefined && a < 10) {
+        bg = { r: 0, g: 0, b: 0, alpha: 0 };
+      } else {
+        bg = { r, g, b, alpha: a !== undefined ? a / 255 : 1 };
+      }
+    } else if (background !== "transparent") {
+      bg = background;
+    }
+
+    const resizedLogoBuffer = await sharp(imageBuffer)
+      .resize(resizeWidth, resizeHeight)
+      .toBuffer();
+
+    const processedBuffer = await sharp(resizedLogoBuffer)
+      .extend({
+        top: padTop,
+        bottom: padBottom,
+        left: padLeft,
+        right: padRight,
+        background: bg
+      })
+      .png()
+      .toBuffer();
+
+    // Upload processed logo
+    const ext = ".png";
+    const filename = `team_logo_normalized_${Date.now()}${ext}`;
+    let nextLogoPath;
+
+    if (storageDriver === "local") {
+      const destDir = path.join(localUploadsDir, "teams");
+      fs.mkdirSync(destDir, { recursive: true });
+      fs.writeFileSync(path.join(destDir, filename), processedBuffer);
+      nextLogoPath = `/uploads/teams/${filename}`;
+    } else {
+      const result = await uploadImage({
+        file: processedBuffer,
+        folder: "teams",
+        filename,
+        mimetype: "image/png"
+      });
+      nextLogoPath = result.url;
+    }
+
+    // Update team in database
+    await db.query("UPDATE teams SET logo = ? WHERE id = ?", [nextLogoPath, id]);
+
+    res.json({
+      success: true,
+      logoUrl: nextLogoPath,
+      message: "Logo normalized and updated successfully."
+    });
+  } catch (error) {
+    console.error("Failed to normalize logo on backend", error);
+    res.status(500).json({ message: "Failed to normalize logo: " + error.message });
+  }
+});
+
 module.exports = router;

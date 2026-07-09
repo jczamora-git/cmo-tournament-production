@@ -1,5 +1,5 @@
-import React, { useState, useRef, useEffect } from "react";
-import { adminGetTeams, adminUpdateTeam } from "../services/api";
+import React, { useState, useEffect } from "react";
+import { adminGetTeams, adminNormalizeTeamLogo } from "../services/api";
 import { apiUrl } from "../config/api";
 
 // Helper to get absolute image URL (resolving local relative paths to backend port in development)
@@ -15,36 +15,28 @@ const getFullImageUrl = (path) => {
  * LogoConverter Component
  * 
  * Normalizes team logos to a perfect 1:1 square ratio with smart centering logic.
- * Avoids CORS / Tainted Canvas issues by using a re-upload flow:
- * 1. Shows the team's current cloud logo as a standard <img> element.
- * 2. Requires a local file upload (drag & drop or click).
- * 3. Once uploaded locally, draws on canvas without security restrictions, allowing customization and upload.
+ * Integrates Option B: Full Server-side Processing using Sharp.
+ * This completely avoids frontend CORS/Canvas tainting issues!
+ * 
+ * Props:
+ * - team: Optional team object. If passed, it locks to this team.
+ * - onComplete: Optional callback triggered after successful normalization.
+ * - onClose: Optional callback to close the modal.
  */
 export default function LogoConverter({ team: propTeam, onComplete, onClose }) {
   const [teams, setTeams] = useState([]);
   const [selectedTeam, setSelectedTeam] = useState(propTeam || null);
   const [loadingTeams, setLoadingTeams] = useState(!propTeam);
   
-  // Image & upload states
-  const [imageSrc, setImageSrc] = useState(null); // Will hold the uploaded file data URL
-  const [isUploaded, setIsUploaded] = useState(false); // True when a local file is loaded
-  const [fileName, setFileName] = useState("logo");
-  
   // Customization parameters
-  const [outputSize, setOutputSize] = useState(512); // Default size 512x512
-  const [scale, setScale] = useState(0.9); // Scale factor (0.5 to 1.0)
-  const [bgMode, setBgMode] = useState("detect"); // 'transparent', 'detect', 'custom'
+  const [resolution, setResolution] = useState(512); // Output resolution (512 or 1024)
+  const [margin, setMargin] = useState(90); // Content margin percentage (50 to 100)
+  const [bgMode, setBgMode] = useState("detect"); // 'transparent', 'detect' (match), 'custom'
   const [customBgColor, setCustomBgColor] = useState("#ffffff");
-  const [detectedBgColor, setDetectedBgColor] = useState("#ffffff");
-  const [dragActive, setDragActive] = useState(false);
-  const [imgElement, setImgElement] = useState(null);
   
   // Status & loading states
-  const [uploading, setUploading] = useState(false);
+  const [processing, setProcessing] = useState(false);
   const [statusMessage, setStatusMessage] = useState({ text: "", type: "" }); // 'success' | 'error' | 'info'
-
-  const canvasRef = useRef(null);
-  const fileInputRef = useRef(null);
 
   // Fetch teams list if no propTeam is provided
   useEffect(() => {
@@ -66,217 +58,56 @@ export default function LogoConverter({ team: propTeam, onComplete, onClose }) {
       });
   }, [propTeam]);
 
-  // Reset when team selection changes
+  // Reset status when team selection changes
   useEffect(() => {
-    setIsUploaded(false);
-    setImgElement(null);
-    setImageSrc(null);
     setStatusMessage({ text: "", type: "" });
   }, [selectedTeam]);
 
-  // Helper to detect background color by sampling the corner pixels of the image
-  const detectBackgroundColor = (img) => {
-    try {
-      const tempCanvas = document.createElement("canvas");
-      const tempCtx = tempCanvas.getContext("2d");
-      tempCanvas.width = img.naturalWidth || img.width;
-      tempCanvas.height = img.naturalHeight || img.height;
-      tempCtx.drawImage(img, 0, 0);
-
-      // Sample 4 corners: top-left, top-right, bottom-left, bottom-right
-      const w = tempCanvas.width;
-      const h = tempCanvas.height;
-      const corners = [
-        tempCtx.getImageData(0, 0, 1, 1).data,
-        tempCtx.getImageData(w - 1, 0, 1, 1).data,
-        tempCtx.getImageData(0, h - 1, 1, 1).data,
-        tempCtx.getImageData(w - 1, h - 1, 1, 1).data,
-      ];
-
-      const rgbToHex = (r, g, b) => {
-        return "#" + [r, g, b].map(x => {
-          const hex = x.toString(16);
-          return hex.length === 1 ? "0" + hex : hex;
-        }).join("");
-      };
-
-      const colorCounts = {};
-      let dominantColor = "#ffffff";
-      let maxCount = 0;
-
-      corners.forEach(([r, g, b, a]) => {
-        if (a < 10) return; // Ignore transparent corners
-        const hex = rgbToHex(r, g, b);
-        colorCounts[hex] = (colorCounts[hex] || 0) + 1;
-        if (colorCounts[hex] > maxCount) {
-          maxCount = colorCounts[hex];
-          dominantColor = hex;
-        }
-      });
-
-      return dominantColor;
-    } catch (e) {
-      console.warn("Could not read canvas pixels", e);
-      return "#ffffff";
-    }
-  };
-
-  // Load uploaded image into Image object
-  useEffect(() => {
-    if (!imageSrc || !isUploaded) return;
-
-    const img = new Image();
-    img.onload = () => {
-      setImgElement(img);
-      const detected = detectBackgroundColor(img);
-      setDetectedBgColor(detected);
-    };
-    img.src = imageSrc;
-  }, [imageSrc, isUploaded]);
-
-  // Redraw canvas whenever parameters or image changes (only when local file is uploaded)
-  useEffect(() => {
-    if (!canvasRef.current || !isUploaded || !imgElement) return;
-    const canvas = canvasRef.current;
-    const ctx = canvas.getContext("2d");
-
-    // Clear canvas
-    ctx.clearRect(0, 0, outputSize, outputSize);
-
-    // 1. Draw Background
-    if (bgMode === "transparent") {
-      // Keep it transparent (already cleared)
-    } else if (bgMode === "detect") {
-      ctx.fillStyle = detectedBgColor;
-      ctx.fillRect(0, 0, outputSize, outputSize);
-    } else if (bgMode === "custom") {
-      ctx.fillStyle = customBgColor;
-      ctx.fillRect(0, 0, outputSize, outputSize);
-    }
-
-    // 2. Draw Image
-    const imgWidth = imgElement.naturalWidth || imgElement.width;
-    const imgHeight = imgElement.naturalHeight || imgElement.height;
-
-    // Smart Centering Logic:
-    // Fit the image inside the target size * scale factor, maintaining aspect ratio.
-    const maxBoundingSize = outputSize * scale;
-    const widthRatio = maxBoundingSize / imgWidth;
-    const heightRatio = maxBoundingSize / imgHeight;
-    const finalScale = Math.min(widthRatio, heightRatio);
-
-    const drawWidth = imgWidth * finalScale;
-    const drawHeight = imgHeight * finalScale;
-
-    const x = (outputSize - drawWidth) / 2;
-    const y = (outputSize - drawHeight) / 2;
-
-    // Draw the image (since it's a local object/data URL, this will never taint the canvas)
-    ctx.drawImage(imgElement, x, y, drawWidth, drawHeight);
-  }, [imgElement, outputSize, scale, bgMode, customBgColor, detectedBgColor, isUploaded]);
-
-  // Handle local file selection
-  const handleFileChange = (e) => {
-    const file = e.target.files?.[0];
-    processFile(file);
-  };
-
-  const processFile = (file) => {
-    if (!file) return;
-    if (!file.type.startsWith("image/")) {
-      alert("Please upload an image file (PNG, JPG, SVG, WebP).");
-      return;
-    }
-
-    // Save filename without extension
-    const nameWithoutExt = file.name.substring(0, file.name.lastIndexOf(".")) || file.name;
-    setFileName(nameWithoutExt);
-
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      setImageSrc(e.target.result);
-      setIsUploaded(true);
-      setStatusMessage({ text: "Logo loaded locally. Customization controls are now unlocked!", type: "info" });
-    };
-    reader.readAsDataURL(file);
-  };
-
-  // Drag and Drop handlers
-  const handleDrag = (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    if (e.type === "dragenter" || e.type === "dragover") {
-      setDragActive(true);
-    } else if (e.type === "dragleave") {
-      setDragActive(false);
-    }
-  };
-
-  const handleDrop = (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setDragActive(false);
-
-    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-      processFile(e.dataTransfer.files[0]);
-    }
-  };
-
-  const triggerFileSelect = () => {
-    fileInputRef.current?.click();
-  };
-
-  // Upload/Save Converted Image
-  const handleSaveAndUpload = async () => {
+  // Handle server-side logo normalization
+  const handleNormalizeLogo = async () => {
     if (!selectedTeam) {
       setStatusMessage({ text: "Please select a team first.", type: "error" });
       return;
     }
 
-    if (!canvasRef.current || !isUploaded) {
-      setStatusMessage({ text: "Please upload a logo file to convert.", type: "error" });
+    if (!selectedTeam.logo) {
+      setStatusMessage({ text: "Selected team does not have a logo to normalize.", type: "error" });
       return;
     }
 
-    setUploading(true);
-    setStatusMessage({ text: "Processing and uploading normalized logo...", type: "info" });
+    setProcessing(true);
+    setStatusMessage({ text: "Server is processing & normalising logo...", type: "info" });
 
     try {
-      // 1. Convert Canvas to Blob (no tainting error, since the source was a local file upload)
-      const blob = await new Promise((resolve) => {
-        canvasRef.current.toBlob((b) => resolve(b), "image/png");
-      });
+      // Prepare payload parameters
+      const payload = {
+        resolution,
+        margin,
+        background: bgMode === "detect" ? "match" : bgMode === "transparent" ? "transparent" : customBgColor
+      };
 
-      if (!blob) {
-        throw new Error("Failed to process image canvas.");
-      }
+      // Call the backend endpoint
+      const response = await adminNormalizeTeamLogo(selectedTeam.id, payload);
 
-      // 2. Prepare Form Data containing team data + processed file
-      const formData = new FormData();
-      formData.append("name", selectedTeam.name);
-      if (selectedTeam.shortname) formData.append("shortname", selectedTeam.shortname);
-      if (selectedTeam.captain_name) formData.append("captain_name", selectedTeam.captain_name);
-      if (selectedTeam.contact) formData.append("contact", selectedTeam.contact);
-      if (selectedTeam.tournament_id) formData.append("tournament_id", selectedTeam.tournament_id);
-      if (selectedTeam.tournament_mode_id) formData.append("tournament_mode_id", selectedTeam.tournament_mode_id);
-      
-      // Append processed file
-      formData.append("logo", blob, `${selectedTeam.name.toLowerCase().replace(/\s+/g, "_")}_1x1.png`);
-
-      // 3. Update database via API
-      await adminUpdateTeam(selectedTeam.id, formData);
-
-      setStatusMessage({ text: "Logo normalized and successfully updated in database!", type: "success" });
+      setStatusMessage({ text: response.message || "Logo normalized and updated successfully!", type: "success" });
       
       if (onComplete) {
         onComplete(selectedTeam.id);
       }
     } catch (err) {
-      console.error("Upload failed", err);
-      setStatusMessage({ text: `Failed to update logo: ${err.message}`, type: "error" });
+      console.error("Normalization failed", err);
+      setStatusMessage({ text: `Failed to normalize logo: ${err.message}`, type: "error" });
     } finally {
-      setUploading(false);
+      setProcessing(false);
     }
+  };
+
+  // Determine CSS preview styling to mock canvas behavior locally
+  const getPreviewBgStyle = () => {
+    if (bgMode === "transparent") return {};
+    if (bgMode === "custom") return { backgroundColor: customBgColor };
+    // For 'detect' mode, we can display a default dark background or transparent
+    return { backgroundColor: "rgba(255, 255, 255, 0.05)" };
   };
 
   return (
@@ -392,49 +223,6 @@ export default function LogoConverter({ team: propTeam, onComplete, onClose }) {
           font-size: 1rem;
         }
 
-        .upload-instruction-card {
-          background: rgba(239, 68, 68, 0.05);
-          border: 1px dashed rgba(239, 68, 68, 0.25);
-          color: #f87171;
-          padding: 0.75rem 1rem;
-          border-radius: 8px;
-          font-size: 0.85rem;
-          text-align: center;
-          font-weight: 500;
-        }
-
-        .upload-zone {
-          border: 2px dashed rgba(255, 255, 255, 0.15);
-          border-radius: 12px;
-          padding: 2rem 1rem;
-          text-align: center;
-          background: rgba(255, 255, 255, 0.02);
-          cursor: pointer;
-          transition: all 0.3s ease;
-        }
-
-        .upload-zone:hover, .upload-zone.drag-active {
-          border-color: #3b82f6;
-          background: rgba(59, 130, 246, 0.05);
-        }
-
-        .upload-icon {
-          width: 36px;
-          height: 36px;
-          margin: 0 auto 0.75rem auto;
-          color: #9ca3af;
-        }
-
-        .upload-text strong {
-          color: #3b82f6;
-        }
-
-        .upload-text p {
-          margin: 0.25rem 0 0 0;
-          font-size: 0.8rem;
-          color: #6b7280;
-        }
-
         .config-card {
           background: rgba(255, 255, 255, 0.02);
           border: 1px solid rgba(255, 255, 255, 0.06);
@@ -443,12 +231,6 @@ export default function LogoConverter({ team: propTeam, onComplete, onClose }) {
           display: flex;
           flex-direction: column;
           gap: 1.25rem;
-          transition: opacity 0.3s ease;
-        }
-
-        .config-card.disabled {
-          opacity: 0.4;
-          pointer-events: none;
         }
 
         .config-group {
@@ -575,12 +357,15 @@ export default function LogoConverter({ team: propTeam, onComplete, onClose }) {
           background-position: 0 0, 0 8px, 8px -8px, -8px 0px;
           overflow: hidden;
           border: 1px solid rgba(255, 255, 255, 0.1);
+          box-sizing: border-box;
         }
 
-        .preview-canvas, .preview-image {
+        .preview-image {
           max-width: 100%;
           max-height: 100%;
           object-fit: contain;
+          box-sizing: border-box;
+          transition: all 0.2s ease;
         }
 
         .preview-placeholder {
@@ -629,7 +414,7 @@ export default function LogoConverter({ team: propTeam, onComplete, onClose }) {
       <div className="logo-converter-header">
         <div>
           <h1>Logo Normalizer & Cloud Sync</h1>
-          <p>Instantly crop, scale, and save 1:1 square team logos directly to the cloud.</p>
+          <p>Instantly crop, scale, and save 1:1 square team logos directly on the server.</p>
         </div>
         {onClose && (
           <button type="button" className="close-modal-btn" onClick={onClose}>
@@ -676,76 +461,25 @@ export default function LogoConverter({ team: propTeam, onComplete, onClose }) {
             )}
           </div>
 
-          {/* Upload Instructions Banner if original cloud image is shown */}
-          {!isUploaded && selectedTeam?.logo && (
-            <div className="upload-instruction-card">
-              ⚠️ To convert this logo, please re-upload the file below.
-            </div>
-          )}
-
-          {/* Upload Area */}
-          <div
-            className={`upload-zone ${dragActive ? "drag-active" : ""}`}
-            onDragEnter={handleDrag}
-            onDragLeave={handleDrag}
-            onDragOver={handleDrag}
-            onDrop={handleDrop}
-            onClick={triggerFileSelect}
-          >
-            <input
-              type="file"
-              ref={fileInputRef}
-              onChange={handleFileChange}
-              accept="image/*"
-              style={{ display: "none" }}
-            />
-            <svg
-              className="upload-icon"
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
-              xmlns="http://www.w3.org/2000/svg"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"
-              />
-            </svg>
-            <span className="upload-text">
-              {isUploaded ? (
-                <>
-                  New logo loaded. Click or drag to replace.
-                </>
-              ) : (
-                <>
-                  <strong>Drag & drop logo file</strong> or <strong>click to upload</strong>
-                </>
-              )}
-              <p>Supports PNG, JPG, SVG, WebP</p>
-            </span>
-          </div>
-
-          {/* Configuration Card - Disabled until a file is locally uploaded */}
-          <div className={`config-card ${!isUploaded ? "disabled" : ""}`}>
+          {/* Configuration Card */}
+          <div className="config-card">
             {/* Output Size */}
             <div className="config-group">
               <span className="config-label">
-                Resolution <span className="config-value-badge">{outputSize}px Square</span>
+                Resolution <span className="config-value-badge">{resolution}px Square</span>
               </span>
               <div className="btn-group">
                 <button
                   type="button"
-                  className={`toggle-btn ${outputSize === 512 ? "active" : ""}`}
-                  onClick={() => setOutputSize(512)}
+                  className={`toggle-btn ${resolution === 512 ? "active" : ""}`}
+                  onClick={() => setResolution(512)}
                 >
                   512 x 512
                 </button>
                 <button
                   type="button"
-                  className={`toggle-btn ${outputSize === 1024 ? "active" : ""}`}
-                  onClick={() => setOutputSize(1024)}
+                  className={`toggle-btn ${resolution === 1024 ? "active" : ""}`}
+                  onClick={() => setResolution(1024)}
                 >
                   1024 x 1024
                 </button>
@@ -755,16 +489,16 @@ export default function LogoConverter({ team: propTeam, onComplete, onClose }) {
             {/* Margins/Scale */}
             <div className="config-group">
               <span className="config-label">
-                Inside Margin (Scale) <span className="config-value-badge">{Math.round(scale * 100)}%</span>
+                Content Margin (Scale) <span className="config-value-badge">{margin}%</span>
               </span>
               <input
                 type="range"
                 className="range-slider"
-                min="0.5"
-                max="1.0"
-                step="0.05"
-                value={scale}
-                onChange={(e) => setScale(parseFloat(e.target.value))}
+                min="50"
+                max="100"
+                step="5"
+                value={margin}
+                onChange={(e) => setMargin(parseInt(e.target.value))}
               />
             </div>
 
@@ -784,7 +518,7 @@ export default function LogoConverter({ team: propTeam, onComplete, onClose }) {
                   className={`toggle-btn ${bgMode === "detect" ? "active" : ""}`}
                   onClick={() => setBgMode("detect")}
                 >
-                  Match Image
+                  Match Corner
                 </button>
                 <button
                   type="button"
@@ -812,23 +546,19 @@ export default function LogoConverter({ team: propTeam, onComplete, onClose }) {
           </div>
         </div>
 
-        {/* Right Side: Preview & Sync Action */}
+        {/* Right Side: CSS-Based Live Preview & Server Sync Action */}
         <div className="preview-section">
-          <div className="preview-container">
-            {isUploaded ? (
-              // Display HTML Canvas for the active local editing flow
-              <canvas
-                ref={canvasRef}
-                width={outputSize}
-                height={outputSize}
-                className="preview-canvas"
-              />
-            ) : selectedTeam?.logo ? (
-              // Display a standard <img> element for the cloud logo (avoids canvas taint error)
+          {/* Preview Container with custom background styling */}
+          <div className="preview-container" style={getPreviewBgStyle()}>
+            {selectedTeam?.logo ? (
               <img
                 src={getFullImageUrl(selectedTeam.logo)}
                 alt={`${selectedTeam.name} Current Logo`}
                 className="preview-image"
+                // Simulate output margin scale in real-time using CSS padding
+                style={{
+                  padding: `${(100 - margin) / 2}%`
+                }}
               />
             ) : (
               <div className="preview-placeholder">
@@ -844,7 +574,7 @@ export default function LogoConverter({ team: propTeam, onComplete, onClose }) {
                   <circle cx="8.5" cy="8.5" r="1.5" />
                   <polyline points="21 15 16 10 5 21" />
                 </svg>
-                <span>No logo uploaded yet</span>
+                <span>Select a team to preview logo</span>
               </div>
             )}
           </div>
@@ -852,10 +582,10 @@ export default function LogoConverter({ team: propTeam, onComplete, onClose }) {
           <button
             type="button"
             className="save-btn"
-            disabled={!selectedTeam || !isUploaded || uploading}
-            onClick={handleSaveAndUpload}
+            disabled={!selectedTeam || !selectedTeam.logo || processing}
+            onClick={handleNormalizeLogo}
           >
-            {uploading ? (
+            {processing ? (
               <>
                 <svg
                   className="animate-spin"
@@ -868,7 +598,7 @@ export default function LogoConverter({ team: propTeam, onComplete, onClose }) {
                   <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                   <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
                 </svg>
-                <span>Uploading...</span>
+                <span>Processing on Server...</span>
               </>
             ) : (
               <>
