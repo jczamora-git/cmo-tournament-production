@@ -4,6 +4,8 @@ import Toast from "../components/Toast";
 import ConfirmationModal from "../components/ConfirmationModal";
 import EmptyState from "../components/EmptyState";
 import LoadingState from "../components/LoadingState";
+import LogoConverter from "../../../pages/LogoConverter";
+
 
 function ManageTeams() {
   const [teams, setTeams] = useState([]);
@@ -23,6 +25,7 @@ function ManageTeams() {
   const [formError, setFormError] = useState("");
   const [saving, setSaving] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState(null);
+  const [logoConverterTarget, setLogoConverterTarget] = useState(null);
 
   // Filters
   const [filterTournamentId, setFilterTournamentId] = useState("");
@@ -293,6 +296,9 @@ function ManageTeams() {
                     </td>
                     <td className="td-actions">
                       <div className="admin-team-actions">
+                        <button type="button" className="button-ghost button-compact" onClick={() => setLogoConverterTarget(team)}>
+                          Convert
+                        </button>
                         <button type="button" className="button-ghost button-compact" onClick={() => openEdit(team)}>
                           Edit
                         </button>
@@ -417,6 +423,20 @@ function ManageTeams() {
         onConfirm={confirmDelete}
         onCancel={() => setDeleteTarget(null)}
       />
+
+      {/* Logo Normalizer & Cloud Sync Modal */}
+      {logoConverterTarget && (
+        <div className="admin-modal-backdrop" role="dialog" aria-modal="true" style={{ zIndex: 1000, overflowY: "auto", padding: "40px 20px" }}>
+          <LogoConverter
+            team={logoConverterTarget}
+            onClose={() => setLogoConverterTarget(null)}
+            onComplete={async () => {
+              await fetchTeams();
+              setTimeout(() => setLogoConverterTarget(null), 1000);
+            }}
+          />
+        </div>
+      )}
 
       <Toast message={toast.message} type={toast.type} onClose={() => setToast({ message: "", type: "info" })} />
     </div>
