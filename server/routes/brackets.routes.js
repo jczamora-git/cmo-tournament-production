@@ -295,6 +295,138 @@ function waitingLabel(sourceRef, displayNoByRef, kind = "winner") {
   return `Waiting: ${who} of ${sourceRef}`;
 }
 
+function isLiveMatchFinished(live) {
+  if (!live) return false;
+  return (
+    String(live.status || "").toLowerCase() === "finished" ||
+    String(live.status || "").toLowerCase() === "done" ||
+    String(live.status || "").toLowerCase() === "completed" ||
+    Boolean(live.series_winner_team_id) ||
+    live.series_completed === 1 ||
+    live.series_completed === true
+  );
+}
+
+/**
+ * Resolve series winner from a live node/match row (controller advancement may
+ * not have pushed next-round team slots yet).
+ */
+function pickWinnerFromLive(live) {
+  if (!live || !isLiveMatchFinished(live)) return null;
+
+  let winnerId =
+    live.series_winner_team_id != null && Number(live.series_winner_team_id) > 0
+      ? Number(live.series_winner_team_id)
+      : null;
+
+  if (!winnerId) {
+    const bs = Number(live.blue_score || 0);
+    const rs = Number(live.red_score || 0);
+    if (bs > rs && live.blue_team_id) winnerId = Number(live.blue_team_id);
+    else if (rs > bs && live.red_team_id) winnerId = Number(live.red_team_id);
+  }
+  if (!winnerId) return null;
+
+  const blueId = live.blue_team_id != null ? Number(live.blue_team_id) : null;
+  const redId = live.red_team_id != null ? Number(live.red_team_id) : null;
+  let name = `Team #${winnerId}`;
+  if (winnerId === blueId) {
+    name = live.blue_team_name || live.blue_team_short || name;
+  } else if (winnerId === redId) {
+    name = live.red_team_name || live.red_team_short || name;
+  }
+  return { team_id: winnerId, name };
+}
+
+function pickLoserFromLive(live) {
+  const winner = pickWinnerFromLive(live);
+  if (!winner || !live) return null;
+  const blueId = live.blue_team_id != null ? Number(live.blue_team_id) : null;
+  const redId = live.red_team_id != null ? Number(live.red_team_id) : null;
+  if (!blueId || !redId) return null;
+  const loserId = winner.team_id === blueId ? redId : winner.team_id === redId ? blueId : null;
+  if (!loserId) return null;
+  const name =
+    loserId === blueId
+      ? live.blue_team_name || live.blue_team_short || `Team #${loserId}`
+      : live.red_team_name || live.red_team_short || `Team #${loserId}`;
+  return { team_id: loserId, name };
+}
+
+function slotNeedsTeam(teamId, teamName) {
+  if (teamId != null && Number(teamId) > 0) return false;
+  if (!teamName) return true;
+  const s = String(teamName);
+  return (
+    s === "TBD" ||
+    s.startsWith("Winner of ") ||
+    s.startsWith("Loser of ") ||
+    s.startsWith("Waiting:")
+  );
+}
+
+/**
+ * Fill empty later-round slots from finished feeder matches (by source_a/b_ref).
+ * Fixes public preview when next-match teams were advanced on Controller but
+ * not yet pushed to production (or only the finished match was synced).
+ */
+function applyFeederAdvancement(structure, byKey) {
+  const fill = (match, { thirdPlace = false } = {}) => {
+    let teamAId = match.team_a_id;
+    let teamBId = match.team_b_id;
+    let teamAName = match.team_a_name;
+    let teamBName = match.team_b_name;
+    let teamAAdvanced = match.team_a_auto_advanced;
+    let teamBAdvanced = match.team_b_auto_advanced;
+
+    const sourceA = match.source_a_ref || match.team_a_source_ref || null;
+    const sourceB = match.source_b_ref || match.team_b_source_ref || null;
+
+    if (slotNeedsTeam(teamAId, teamAName) && sourceA) {
+      const feeder = byKey.get(String(sourceA));
+      const picked = thirdPlace ? pickLoserFromLive(feeder) : pickWinnerFromLive(feeder);
+      if (picked) {
+        teamAId = picked.team_id;
+        teamAName = picked.name;
+        teamAAdvanced = true;
+      }
+    }
+    if (slotNeedsTeam(teamBId, teamBName) && sourceB) {
+      const feeder = byKey.get(String(sourceB));
+      const picked = thirdPlace ? pickLoserFromLive(feeder) : pickWinnerFromLive(feeder);
+      if (picked) {
+        teamBId = picked.team_id;
+        teamBName = picked.name;
+        teamBAdvanced = true;
+      }
+    }
+
+    return {
+      ...match,
+      team_a_id: teamAId,
+      team_b_id: teamBId,
+      team_a_name: teamAName,
+      team_b_name: teamBName,
+      team_a_auto_advanced: teamAAdvanced,
+      team_b_auto_advanced: teamBAdvanced,
+    };
+  };
+
+  // Multi-pass: deep trees where intermediate rounds only exist in structure
+  // still rely on live feeders; one pass is enough when all feeders are live finished matches.
+  // Two passes help if a later pass could use updated structure names (not needed for live keys).
+  for (let pass = 0; pass < 3; pass += 1) {
+    structure.rounds = (structure.rounds || []).map((round) => ({
+      ...round,
+      matches: (round.matches || []).map((m) => fill(m)),
+    }));
+    if (structure.third_place_match) {
+      structure.third_place_match = fill(structure.third_place_match, { thirdPlace: true });
+    }
+  }
+  return structure;
+}
+
 function applyLiveOverlay(structure, liveRows) {
   const byKey = new Map();
   for (const row of liveRows) {
@@ -427,6 +559,9 @@ function applyLiveOverlay(structure, liveRows) {
       { thirdPlace: true }
     );
   }
+
+  // Advance winners into empty next-round slots from finished feeder matches
+  structure = applyFeederAdvancement(structure, byKey);
 
   // Waiting labels: prefer feeder live match_no (Controller attachWaitingLabels style),
   // else generator display_match_no of the source ref.
