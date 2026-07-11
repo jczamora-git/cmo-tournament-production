@@ -62,9 +62,39 @@ async function ensureSyncSchema(connection = db) {
       await connection.query(
         `ALTER TABLE bracket_rounds ADD COLUMN IF NOT EXISTS round_number INTEGER DEFAULT 1`
       );
+      // Live DBs may use Controller-style column name `round_no` (NOT NULL)
+      await connection.query(
+        `ALTER TABLE bracket_rounds ADD COLUMN IF NOT EXISTS round_no INTEGER`
+      );
       await connection.query(
         `ALTER TABLE bracket_rounds ADD COLUMN IF NOT EXISTS sort_order INTEGER DEFAULT 0`
       );
+      // Keep round_no / round_number in sync when either is missing
+      try {
+        await connection.query(`
+          UPDATE bracket_rounds
+          SET round_number = COALESCE(round_number, round_no, 1),
+              round_no = COALESCE(round_no, round_number, 1)
+          WHERE round_number IS NULL OR round_no IS NULL
+        `);
+      } catch (_) {
+        /* one of the columns may still be missing on very old installs */
+      }
+      // Defaults so omitted columns never insert NULL into NOT NULL round_no
+      try {
+        await connection.query(
+          `ALTER TABLE bracket_rounds ALTER COLUMN round_no SET DEFAULT 1`
+        );
+      } catch (_) {
+        /* ignore */
+      }
+      try {
+        await connection.query(
+          `ALTER TABLE bracket_rounds ALTER COLUMN round_number SET DEFAULT 1`
+        );
+      } catch (_) {
+        /* ignore */
+      }
       await connection.query(`
         CREATE UNIQUE INDEX IF NOT EXISTS uq_bracket_rounds_public_round_id
         ON bracket_rounds (public_round_id) WHERE public_round_id IS NOT NULL

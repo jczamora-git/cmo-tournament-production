@@ -1716,6 +1716,128 @@ function pickPublicId(...candidates) {
   return null;
 }
 
+/** Always returns a positive integer >= 1 (never null/NaN). */
+function safePositiveInt(value, fallback = 1) {
+  const n = Number(value);
+  if (Number.isFinite(n) && n > 0) return Math.floor(n);
+  const f = Number(fallback);
+  return Number.isFinite(f) && f > 0 ? Math.floor(f) : 1;
+}
+
+/**
+ * Insert a bracket_rounds row, always populating round_no (NOT NULL on live PG).
+ * Tries schema variants: round_no only, round_number only, or both.
+ * Round numbers are inlined as sanitized integers so they can never bind as SQL NULL.
+ */
+async function insertBracketRoundRow(connection, {
+  publicRoundId,
+  bracketId,
+  publicBracketId,
+  name,
+  roundNumber,
+  sortOrder,
+}) {
+  const rn = safePositiveInt(roundNumber, 1);
+  const so = safePositiveInt(sortOrder, rn);
+  const nm = name != null && String(name).trim() ? String(name).trim() : `Round ${rn}`;
+
+  const attempts = [
+    // Both columns (preferred)
+    {
+      sql: `INSERT INTO bracket_rounds (
+              public_round_id, bracket_id, public_bracket_id, name,
+              round_no, round_number, sort_order
+            ) VALUES (?, ?, ?, ?, ${rn}, ${rn}, ${so})`,
+      params: [publicRoundId, bracketId, publicBracketId, nm],
+    },
+    // Controller-style: round_no only
+    {
+      sql: `INSERT INTO bracket_rounds (
+              public_round_id, bracket_id, public_bracket_id, name, round_no, sort_order
+            ) VALUES (?, ?, ?, ?, ${rn}, ${so})`,
+      params: [publicRoundId, bracketId, publicBracketId, nm],
+    },
+    // ensureSyncSchema style: round_number only
+    {
+      sql: `INSERT INTO bracket_rounds (
+              public_round_id, bracket_id, public_bracket_id, name, round_number, sort_order
+            ) VALUES (?, ?, ?, ?, ${rn}, ${so})`,
+      params: [publicRoundId, bracketId, publicBracketId, nm],
+    },
+    // Minimal
+    {
+      sql: `INSERT INTO bracket_rounds (bracket_id, name, round_no) VALUES (?, ?, ${rn})`,
+      params: [bracketId, nm],
+    },
+    {
+      sql: `INSERT INTO bracket_rounds (bracket_id, name, round_number) VALUES (?, ?, ${rn})`,
+      params: [bracketId, nm],
+    },
+  ];
+
+  let lastErr = null;
+  for (const attempt of attempts) {
+    try {
+      return await connection.query(attempt.sql, attempt.params);
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr || new Error(`Failed to insert bracket_round with round_no=${rn}`);
+}
+
+async function updateBracketRoundRow(connection, {
+  existingId,
+  bracketId,
+  publicBracketId,
+  publicRoundId,
+  name,
+  roundNumber,
+  sortOrder,
+}) {
+  const rn = safePositiveInt(roundNumber, 1);
+  const so = safePositiveInt(sortOrder, rn);
+  const nm = name != null && String(name).trim() ? String(name).trim() : `Round ${rn}`;
+
+  const attempts = [
+    {
+      sql: `UPDATE bracket_rounds SET
+              bracket_id = ?, public_bracket_id = ?,
+              public_round_id = COALESCE(public_round_id, ?),
+              name = ?, round_no = ${rn}, round_number = ${rn}, sort_order = ${so},
+              updated_at = NOW()
+            WHERE id = ?`,
+      params: [bracketId, publicBracketId, publicRoundId || existingId, nm, existingId],
+    },
+    {
+      sql: `UPDATE bracket_rounds SET
+              bracket_id = ?, public_bracket_id = ?,
+              public_round_id = COALESCE(public_round_id, ?),
+              name = ?, round_no = ${rn}, sort_order = ${so}, updated_at = NOW()
+            WHERE id = ?`,
+      params: [bracketId, publicBracketId, publicRoundId || existingId, nm, existingId],
+    },
+    {
+      sql: `UPDATE bracket_rounds SET
+              bracket_id = ?, public_bracket_id = ?,
+              public_round_id = COALESCE(public_round_id, ?),
+              name = ?, round_number = ${rn}, sort_order = ${so}, updated_at = NOW()
+            WHERE id = ?`,
+      params: [bracketId, publicBracketId, publicRoundId || existingId, nm, existingId],
+    },
+  ];
+
+  let lastErr = null;
+  for (const attempt of attempts) {
+    try {
+      return await connection.query(attempt.sql, attempt.params);
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr || new Error(`Failed to update bracket_round id=${existingId}`);
+}
+
 /** Non-empty string key for same-request Controller local id maps (allows string keys). */
 function pickControllerKey(...candidates) {
   for (const c of candidates) {
@@ -2238,11 +2360,26 @@ router.post("/brackets", async (req, res) => {
         const { bracketId, publicBracketId } = await resolveBracketIdForChild(item, "bracket_round");
 
         const name =
-          item.name != null ? String(item.name) : item.title != null ? String(item.title) : null;
-        const roundNumber =
-          parsePositiveInt(item.round_number || item.round_no || item.roundNumber || item.order) || 1;
-        const sortOrder =
-          parseNonNegInt(item.sort_order ?? item.sortOrder, roundNumber) ?? roundNumber;
+          item.name != null
+            ? String(item.name)
+            : item.title != null
+              ? String(item.title)
+              : null;
+        // Accept Controller `round_no` and Production `round_number` — never null
+        const roundNumber = safePositiveInt(
+          item.round_no ??
+            item.round_number ??
+            item.roundNumber ??
+            item.round ??
+            item.order ??
+            item.sort_order ??
+            item.sortOrder,
+          1
+        );
+        const sortOrder = safePositiveInt(
+          item.sort_order ?? item.sortOrder ?? item.round_no ?? item.round_number,
+          roundNumber
+        );
 
         let existingId = null;
         if (publicRoundId) {
@@ -2253,10 +2390,35 @@ router.post("/brackets", async (req, res) => {
           if (found[0]) existingId = found[0].id;
         }
         if (!existingId) {
-          const [foundByNo] = await connection.query(
-            `SELECT id FROM bracket_rounds WHERE bracket_id = ? AND round_number = ? LIMIT 1`,
-            [bracketId, roundNumber]
-          );
+          // Support schemas with either round_number or round_no
+          let foundByNo = [];
+          try {
+            const [rows] = await connection.query(
+              `SELECT id FROM bracket_rounds
+               WHERE bracket_id = ? AND (round_number = ? OR round_no = ?)
+               LIMIT 1`,
+              [bracketId, roundNumber, roundNumber]
+            );
+            foundByNo = rows;
+          } catch (_) {
+            try {
+              const [rows] = await connection.query(
+                `SELECT id FROM bracket_rounds WHERE bracket_id = ? AND round_number = ? LIMIT 1`,
+                [bracketId, roundNumber]
+              );
+              foundByNo = rows;
+            } catch (__) {
+              try {
+                const [rows] = await connection.query(
+                  `SELECT id FROM bracket_rounds WHERE bracket_id = ? AND round_no = ? LIMIT 1`,
+                  [bracketId, roundNumber]
+                );
+                foundByNo = rows;
+              } catch (___) {
+                foundByNo = [];
+              }
+            }
+          }
           if (foundByNo[0]) existingId = foundByNo[0].id;
         }
 
@@ -2265,22 +2427,15 @@ router.post("/brackets", async (req, res) => {
 
         if (existingId) {
           productionRoundId = existingId;
-          await connection.query(
-            `UPDATE bracket_rounds SET
-              bracket_id = ?, public_bracket_id = ?,
-              public_round_id = COALESCE(public_round_id, ?),
-              name = ?, round_number = ?, sort_order = ?, updated_at = NOW()
-             WHERE id = ?`,
-            [
-              bracketId,
-              publicBracketId,
-              publicRoundId || existingId,
-              name,
-              roundNumber,
-              sortOrder,
-              existingId,
-            ]
-          );
+          await updateBracketRoundRow(connection, {
+            existingId,
+            bracketId,
+            publicBracketId,
+            publicRoundId,
+            name,
+            roundNumber,
+            sortOrder,
+          });
           if (!publicRoundId) {
             const [row] = await connection.query(
               `SELECT public_round_id FROM bracket_rounds WHERE id = ?`,
@@ -2298,13 +2453,20 @@ router.post("/brackets", async (req, res) => {
           }
           stats.updated += 1;
         } else {
-          const [result, meta] = await connection.query(
-            `INSERT INTO bracket_rounds (
-              public_round_id, bracket_id, public_bracket_id, name, round_number, sort_order
-            ) VALUES (?, ?, ?, ?, ?, ?)`,
-            [publicRoundId, bracketId, publicBracketId, name, roundNumber, sortOrder]
-          );
+          const [result, meta] = await insertBracketRoundRow(connection, {
+            publicRoundId,
+            bracketId,
+            publicBracketId,
+            name,
+            roundNumber,
+            sortOrder,
+          });
           productionRoundId = getInsertId(result, meta);
+          if (!productionRoundId) {
+            throw new Error(
+              `bracket_round insert did not return id (round_no=${roundNumber}, bracket_id=${bracketId})`
+            );
+          }
           if (!publicRoundId && productionRoundId) {
             await connection.query(
               `UPDATE bracket_rounds SET public_round_id = ? WHERE id = ?`,

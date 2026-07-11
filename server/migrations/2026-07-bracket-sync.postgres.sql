@@ -34,10 +34,19 @@ CREATE TABLE IF NOT EXISTS bracket_rounds (
   public_bracket_id INTEGER,
   name VARCHAR(255),
   round_number INTEGER DEFAULT 1,
+  round_no INTEGER DEFAULT 1,
   sort_order INTEGER DEFAULT 0,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Live installs may already have the table without round_no (Controller-compatible column)
+ALTER TABLE bracket_rounds ADD COLUMN IF NOT EXISTS round_no INTEGER;
+ALTER TABLE bracket_rounds ADD COLUMN IF NOT EXISTS round_number INTEGER DEFAULT 1;
+UPDATE bracket_rounds
+SET round_number = COALESCE(round_number, round_no, 1),
+    round_no = COALESCE(round_no, round_number, 1)
+WHERE round_number IS NULL OR round_no IS NULL;
 
 CREATE TABLE IF NOT EXISTS bracket_nodes (
   id SERIAL PRIMARY KEY,
