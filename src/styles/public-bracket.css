@@ -1,11 +1,13 @@
-/* Public bracket / schedule / history — Controller-matched dark broadcast UI */
+/* ============================================================
+   Public Bracket Preview — cloned from Controller UI
+   ============================================================ */
 
 .helper-text {
   color: var(--jz-text-muted, #94a3b8);
   font-size: 12px;
 }
 
-/* —— Tree shell —— */
+/* —— Tree + connectors —— */
 .bracket-tree-canvas {
   padding: 0;
   border: 0;
@@ -84,13 +86,16 @@
   border-radius: 10px;
   background: rgba(8, 13, 24, 0.92);
   overflow: visible;
-  box-shadow: none;
   transition: border-color 0.18s ease, background 0.18s ease;
 }
 
 .bracket-match-card:hover {
   border-color: rgba(220, 38, 38, 0.22);
   background: rgba(10, 16, 28, 0.96);
+}
+
+.bracket-match-finished {
+  border-color: rgba(34, 197, 94, 0.45) !important;
 }
 
 .bracket-team-row {
@@ -105,10 +110,6 @@
 .bracket-third-place-panel {
   width: min(100%, 360px);
   margin-top: 28px;
-}
-
-.bracket-match-finished {
-  border-color: rgba(34, 197, 94, 0.45) !important;
 }
 
 .bracket-third-place-card {
@@ -126,6 +127,7 @@
 .bracket-third-place-card .panel-header h2 {
   margin: 0;
   font-size: 1rem;
+  color: var(--jz-text-main, #f8fafc);
 }
 
 .modern-card {
@@ -135,7 +137,7 @@
   background: rgba(12, 18, 28, 0.9);
 }
 
-/* —— Public bracket page (Controller reference) —— */
+/* —— Page chrome (Controller public-bracket-page) —— */
 .public-bracket-page {
   min-height: calc(100vh - 80px);
   padding: 28px 32px 40px;
@@ -274,6 +276,7 @@
   font-weight: 600;
   cursor: pointer;
   transition: background 0.15s ease, border-color 0.15s ease;
+  text-decoration: none;
 }
 
 .public-bracket-refresh-btn:hover:not(:disabled) {
@@ -407,7 +410,7 @@
 }
 
 .public-bracket-canvas {
-  min-height: 520px;
+  min-height: 720px;
   padding: 18px;
   border-radius: 18px;
   border: 1px solid rgba(148, 163, 184, 0.12);
@@ -445,7 +448,6 @@
   background: rgba(18, 24, 36, 0.96);
 }
 
-/* —— Enhanced schedule / history —— */
 .public-matches-toolbar {
   display: flex;
   flex-wrap: wrap;

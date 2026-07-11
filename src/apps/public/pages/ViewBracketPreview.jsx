@@ -1,5 +1,9 @@
+/**
+ * Public Bracket Preview — cloned from Controller BracketPreviewPage.
+ * Same layout, stats, refresh behavior, and BracketTreePreview (full variant).
+ */
 import { useCallback, useEffect, useState } from "react";
-import { useSearchParams, Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import {
   AlertCircle,
   Clock,
@@ -10,7 +14,7 @@ import {
   Trophy,
   Users,
 } from "lucide-react";
-import BracketTreePreview from "../../../components/bracket/BracketTreePreview";
+import BracketTreePreview from "../../../components/bracket/BracketTreePreview.jsx";
 import { getBracketPreview, getBrackets } from "../../../services/api";
 
 const POLL_INTERVAL_MS = 58_000;
@@ -56,14 +60,17 @@ function ViewBracketPreview() {
   const fetchFromApi = useCallback(
     async (id, { silent = false } = {}) => {
       if (!id) return;
-      if (silent) setIsRefreshing(true);
-      else {
+
+      if (silent) {
+        setIsRefreshing(true);
+      } else {
         setIsLoading(true);
         setError("");
       }
 
       try {
         const res = await getBracketPreview(id);
+
         if (res?.is_group_stage) {
           setNotFound(false);
           setError("Group stage brackets do not have a single-elimination tree preview.");
@@ -71,6 +78,7 @@ function ViewBracketPreview() {
           if (!silent) setPreview(null);
           return;
         }
+
         if (res?.bracket) {
           setPreview(res.bracket);
           applyMeta(res);
@@ -107,9 +115,9 @@ function ViewBracketPreview() {
       setNotFound(true);
       setIsLoading(false);
       setPreview(null);
-      // Load list for picker when no id
+      setError("");
       getBrackets()
-        .then((res) => setBracketList(res?.brackets || res || []))
+        .then((res) => setBracketList(res?.brackets || []))
         .catch(() => setBracketList([]));
       return undefined;
     }
@@ -152,6 +160,7 @@ function ViewBracketPreview() {
   const secondaryTitle =
     tournamentName && bracketName && bracketName !== tournamentName ? bracketName : null;
 
+  // —— No bracket_id: list picker (production extra; controller shows not-found) ——
   if (!bracketId) {
     return (
       <div className="public-bracket-page">
@@ -167,7 +176,6 @@ function ViewBracketPreview() {
             </p>
           </div>
         </header>
-
         {bracketList.length > 0 ? (
           <div className="public-bracket-list-links">
             {bracketList.map((b) => (
@@ -179,8 +187,9 @@ function ViewBracketPreview() {
                 <div>
                   <strong>{b.tournament_name || b.name || `Bracket #${b.id}`}</strong>
                   <div className="helper-text">
-                    {b.name && b.tournament_name ? b.name : null}
-                    {b.tournament_mode_name ? ` · ${b.tournament_mode_name}` : ""}
+                    {[b.name && b.tournament_name ? b.name : null, b.tournament_mode_name]
+                      .filter(Boolean)
+                      .join(" · ")}
                   </div>
                 </div>
                 <span className="helper-text">ID {b.id}</span>
@@ -216,9 +225,6 @@ function ViewBracketPreview() {
             <br />
             Use <code>/bracket-preview?bracket_id=…</code> to open a live bracket.
           </p>
-          <Link to="/bracket-preview" className="public-bracket-refresh-btn" style={{ marginTop: 12 }}>
-            Browse brackets
-          </Link>
         </div>
       </div>
     );
@@ -330,9 +336,8 @@ function ViewBracketPreview() {
           </div>
 
           <section className="bracket-canvas public-bracket-canvas">
-            {/* key forces connector re-measure when data refreshes */}
             <BracketTreePreview
-              key={`bracket-tree-${lastUpdated?.getTime?.() || "0"}-${preview.rounds?.length || 0}`}
+              key={`tree-${lastUpdated?.getTime?.() || 0}-${preview.rounds?.length || 0}`}
               preview={preview}
               variant="full"
             />

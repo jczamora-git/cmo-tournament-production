@@ -319,21 +319,11 @@ function BracketTreePreview({ preview, variant = "controller" }) {
       return undefined;
     }
 
-    // Re-measure connectors after layout paints (fonts/async images)
     let frameId = requestAnimationFrame(() => {
       window.dispatchEvent(new Event("resize"));
-      frameId = requestAnimationFrame(() => {
-        window.dispatchEvent(new Event("resize"));
-      });
     });
-    const t = window.setTimeout(() => {
-      window.dispatchEvent(new Event("resize"));
-    }, 80);
 
-    return () => {
-      cancelAnimationFrame(frameId);
-      window.clearTimeout(t);
-    };
+    return () => cancelAnimationFrame(frameId);
   }, [preview, variant]);
 
   if (!preview) {

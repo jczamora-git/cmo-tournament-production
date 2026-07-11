@@ -1,11 +1,15 @@
 /**
- * Public read-only bracket endpoints.
- * Builds Controller-compatible tree preview for BracketTreePreview:
- * - bracket_match_ref + source_a_ref/source_b_ref → connecting lines
- * - team names / scores / waiting labels → correct advancement display
+ * Public bracket API — mirrors Controller GET /api/brackets/:id/preview
+ * so production BracketTreePreview gets the same structure/labels/connectors.
+ *
+ * Pipeline (same as Controller):
+ * 1) Load seeds + settings_json
+ * 2) generateSingleEliminationBracket(...) → full tree with source refs
+ * 3) Overlay live match teams/scores from bracket_nodes + matches by node_key
  */
 const express = require("express");
 const db = require("../db");
+const { generateSingleEliminationBracket } = require("../services/bracketGenerator");
 
 const router = express.Router();
 
@@ -15,26 +19,15 @@ function toInt(v) {
   return Number.isFinite(n) ? n : null;
 }
 
-function isFinishedStatus(status) {
-  const s = String(status || "").toLowerCase();
-  return s === "finished" || s === "done" || s === "completed";
-}
-
-function isTruthyFlag(v) {
-  return v === true || v === 1 || v === "1" || v === "true";
-}
-
 async function loadBracket(connection, idParam) {
   const id = toInt(idParam);
   if (!id) return null;
-
   try {
     const [byId] = await connection.query(`SELECT * FROM brackets WHERE id = ? LIMIT 1`, [id]);
     if (byId[0]) return byId[0];
   } catch (_) {
     /* ignore */
   }
-
   try {
     const [byPublic] = await connection.query(
       `SELECT * FROM brackets WHERE public_bracket_id = ? LIMIT 1`,
@@ -47,573 +40,478 @@ async function loadBracket(connection, idParam) {
   return null;
 }
 
-async function loadTournamentMeta(connection, tournamentId, modeId) {
-  let tournamentName = null;
-  let modeName = null;
-  try {
-    if (tournamentId) {
-      const [t] = await connection.query(`SELECT name FROM tournaments WHERE id = ? LIMIT 1`, [
-        tournamentId,
-      ]);
-      tournamentName = t[0]?.name || null;
+/**
+ * Load live node+match rows keyed by node_key (Controller-compatible fields).
+ */
+async function loadLiveNodesByKey(connection, bracketId) {
+  // Prefer join on match_id; also try public_match_id mappings
+  const queries = [
+    `SELECT
+        bn.node_key,
+        bn.position,
+        bn.label,
+        bn.match_id,
+        bn.public_match_id,
+        bn.winner_to_node_id,
+        bn.winner_to_slot,
+        bn.loser_to_node_id,
+        bn.loser_to_slot,
+        bn.next_node_id,
+        bn.next_public_node_id,
+        bn.id AS node_id,
+        m.id AS match_db_id,
+        m.match_no,
+        m.blue_team_id,
+        m.red_team_id,
+        m.blue_score,
+        m.red_score,
+        m.status,
+        m.series_winner_team_id,
+        m.series_completed,
+        m.mode,
+        m.series_format,
+        m.title,
+        bt.name AS blue_team_name,
+        bt.shortname AS blue_team_short,
+        rt.name AS red_team_name,
+        rt.shortname AS red_team_short
+     FROM bracket_nodes bn
+     LEFT JOIN matches m
+       ON m.id = bn.match_id
+       OR (bn.public_match_id IS NOT NULL AND m.public_match_id = bn.public_match_id)
+       OR (bn.public_match_id IS NOT NULL AND m.id = bn.public_match_id)
+     LEFT JOIN teams bt ON bt.id = m.blue_team_id
+     LEFT JOIN teams rt ON rt.id = m.red_team_id
+     WHERE bn.bracket_id = ?`,
+    `SELECT
+        bn.node_key,
+        bn.position,
+        bn.label,
+        bn.match_id,
+        bn.public_match_id,
+        bn.id AS node_id,
+        m.id AS match_db_id,
+        m.match_no,
+        m.blue_team_id,
+        m.red_team_id,
+        m.blue_score,
+        m.red_score,
+        m.status,
+        m.series_winner_team_id,
+        m.series_completed,
+        m.mode,
+        m.series_format,
+        bt.name AS blue_team_name,
+        bt.shortname AS blue_team_short,
+        rt.name AS red_team_name,
+        rt.shortname AS red_team_short
+     FROM bracket_nodes bn
+     LEFT JOIN matches m ON m.id = bn.match_id
+     LEFT JOIN teams bt ON bt.id = m.blue_team_id
+     LEFT JOIN teams rt ON rt.id = m.red_team_id
+     WHERE bn.bracket_id = ?`,
+    `SELECT bn.node_key, bn.position, bn.label, bn.match_id, bn.public_match_id, bn.id AS node_id
+     FROM bracket_nodes bn WHERE bn.bracket_id = ?`,
+  ];
+
+  for (const sql of queries) {
+    try {
+      const [rows] = await connection.query(sql, [bracketId]);
+      return rows;
+    } catch (_) {
+      /* try next */
     }
-  } catch (_) {
-    /* ignore */
   }
-  try {
-    if (modeId) {
-      const [m] = await connection.query(
-        `SELECT name FROM tournament_modes WHERE id = ? LIMIT 1`,
-        [modeId]
-      );
-      modeName = m[0]?.name || null;
-    }
-  } catch (_) {
-    /* ignore */
-  }
-  return { tournamentName, modeName };
-}
-
-function isThirdPlaceRound(r) {
-  const name = String(r?.name || "").toLowerCase();
-  const side = String(r?.bracket_side || r?.side || "").toLowerCase();
-  return (
-    side.includes("third") ||
-    name.includes("third") ||
-    name.includes("3rd") ||
-    name.includes("battle for third")
-  );
-}
-
-function sortNodes(list) {
-  return [...list].sort(
-    (a, b) =>
-      (toInt(a.position) ?? 9999) - (toInt(b.position) ?? 9999) ||
-      (toInt(a.id) || 0) - (toInt(b.id) || 0)
-  );
-}
-
-function nodeKeyOf(node, roundNo, indexInRound) {
-  const raw = node.node_key != null ? String(node.node_key).trim() : "";
-  if (raw) return raw;
-  return `R${roundNo}M${indexInRound + 1}`;
+  return [];
 }
 
 /**
- * Resolve feeder links into each destination node.
- * Priority:
- * 1) explicit next_node_id / next_public_node_id graph
- * 2) classic SE pairing by position within consecutive main rounds
+ * Build waiting labels from generator structure (source refs) + display numbers.
+ * Controller uses winner_to_node_id; production often lacks that after sync,
+ * but generator already encodes source_a_ref / source_b_ref.
  */
-function resolveFeeders(mainRoundNodes, allNodes) {
-  // destNodeId -> [sourceKey, sourceKey]
-  const feedersByDestId = new Map();
+function buildDisplayNoByRef(structure) {
+  const map = new Map();
+  (structure.rounds || []).forEach((round) => {
+    (round.matches || []).forEach((m) => {
+      if (m.bracket_match_ref) {
+        const no = m.display_match_no ?? m.match_no ?? m.bracket_match_no;
+        if (no != null) map.set(m.bracket_match_ref, Number(no));
+      }
+    });
+  });
+  if (structure.third_place_match?.bracket_match_ref) {
+    const m = structure.third_place_match;
+    const no = m.display_match_no ?? m.match_no ?? m.bracket_match_no;
+    if (no != null) map.set(m.bracket_match_ref, Number(no));
+  }
+  return map;
+}
 
-  const nodesById = new Map(allNodes.map((n) => [Number(n.id), n]));
-  const nodesByKey = new Map();
-  for (const n of allNodes) {
-    if (n._key) nodesByKey.set(String(n._key), n);
-    if (n.node_key) nodesByKey.set(String(n.node_key), n);
-    if (n.public_node_id != null) nodesByKey.set(String(n.public_node_id), n);
+function waitingLabel(sourceRef, displayNoByRef, kind = "winner") {
+  if (!sourceRef) return "TBD";
+  const n = displayNoByRef.get(sourceRef);
+  const who = kind === "loser" ? "Loser" : "Winner";
+  if (n != null) return `Waiting: ${who} of Match #${n}`;
+  return `Waiting: ${who} of ${sourceRef}`;
+}
+
+function applyLiveOverlay(structure, liveRows) {
+  const byKey = new Map();
+  for (const row of liveRows) {
+    if (row.node_key) byKey.set(String(row.node_key), row);
   }
 
-  const pushFeeder = (destId, sourceKey, sourcePos) => {
-    if (!destId || !sourceKey) return;
-    if (!feedersByDestId.has(destId)) feedersByDestId.set(destId, []);
-    const list = feedersByDestId.get(destId);
-    if (list.some((x) => x.key === sourceKey)) return;
-    list.push({ key: sourceKey, position: sourcePos ?? 0 });
-    list.sort((a, b) => a.position - b.position);
+  // map ref -> live match_no for "Waiting: Winner of Match #N" (Controller style)
+  const liveMatchNoByRef = new Map();
+  for (const row of liveRows) {
+    if (row.node_key && row.match_no != null) {
+      liveMatchNoByRef.set(String(row.node_key), Number(row.match_no));
+    }
+  }
+
+  const apply = (match, nodeKey, { thirdPlace = false } = {}) => {
+    const live = byKey.get(nodeKey || match.bracket_match_ref);
+    const sourceA = match.source_a_ref || match.team_a_source_ref || null;
+    const sourceB = match.source_b_ref || match.team_b_source_ref || null;
+
+    // Keep generator display_match_no for MATCH N headers (Controller parity)
+    const generatorDisplayNo =
+      match.display_match_no ?? match.bracket_match_no ?? null;
+
+    if (!live) {
+      return {
+        ...match,
+        source_a_ref: sourceA,
+        source_b_ref: sourceB,
+        team_a_source_ref: sourceA,
+        team_b_source_ref: sourceB,
+        display_match_no: generatorDisplayNo,
+      };
+    }
+
+    const finished =
+      String(live.status || "").toLowerCase() === "finished" ||
+      String(live.status || "").toLowerCase() === "done" ||
+      String(live.status || "").toLowerCase() === "completed" ||
+      Boolean(live.series_winner_team_id) ||
+      live.series_completed === 1 ||
+      live.series_completed === true;
+
+    const teamAId =
+      live.blue_team_id != null && Number(live.blue_team_id) > 0
+        ? Number(live.blue_team_id)
+        : match.team_a_id && Number(match.team_a_id) > 0
+          ? Number(match.team_a_id)
+          : null;
+    const teamBId =
+      live.red_team_id != null && Number(live.red_team_id) > 0
+        ? Number(live.red_team_id)
+        : match.team_b_id && Number(match.team_b_id) > 0
+          ? Number(match.team_b_id)
+          : null;
+
+    // Generator may already place a real team (or BYE) in a slot before match link exists
+    const genA = match.team_a_name;
+    const genB = match.team_b_name;
+    const genAIsReal =
+      genA &&
+      !String(genA).startsWith("Winner of") &&
+      !String(genA).startsWith("Loser of") &&
+      !String(genA).startsWith("Waiting:") &&
+      String(genA).toUpperCase() !== "TBD";
+    const genBIsReal =
+      genB &&
+      !String(genB).startsWith("Winner of") &&
+      !String(genB).startsWith("Loser of") &&
+      !String(genB).startsWith("Waiting:") &&
+      String(genB).toUpperCase() !== "TBD";
+
+    let teamAName = null;
+    let teamBName = null;
+
+    if (teamAId) {
+      teamAName =
+        live.blue_team_name ||
+        live.blue_team_short ||
+        (genAIsReal ? genA : null) ||
+        `Team #${teamAId}`;
+    } else if (genAIsReal) {
+      teamAName = genA; // seed / BYE from generator
+    }
+
+    if (teamBId) {
+      teamBName =
+        live.red_team_name ||
+        live.red_team_short ||
+        (genBIsReal ? genB : null) ||
+        `Team #${teamBId}`;
+    } else if (genBIsReal) {
+      teamBName = genB;
+    }
+
+    return {
+      ...match,
+      team_a_id: teamAId,
+      team_b_id: teamBId,
+      team_a_name: teamAName,
+      team_b_name: teamBName,
+      team_a_auto_advanced: teamAId ? false : match.team_a_auto_advanced,
+      team_b_auto_advanced: teamBId ? false : match.team_b_auto_advanced,
+      match_id: live.match_db_id || live.match_id || match.match_id,
+      match_no: live.match_no != null ? Number(live.match_no) : match.match_no,
+      // Header number: keep generator sequential display (1..N), not global match_no
+      display_match_no: generatorDisplayNo,
+      match_status: live.status || match.match_status,
+      blue_score: live.blue_score != null ? live.blue_score : match.blue_score ?? 0,
+      red_score: live.red_score != null ? live.red_score : match.red_score ?? 0,
+      series_winner_team_id: live.series_winner_team_id ?? match.series_winner_team_id,
+      is_finished: finished,
+      source_a_ref: sourceA,
+      source_b_ref: sourceB,
+      team_a_source_ref: sourceA,
+      team_b_source_ref: sourceB,
+      should_display: match.should_display !== false,
+      is_third_place: thirdPlace || match.is_third_place,
+    };
   };
 
-  // 1) Explicit graph edges
-  for (const n of allNodes) {
-    const sourceKey = n._key;
-    const sourcePos = toInt(n.position) || 0;
-    let destId = toInt(n.next_node_id);
+  structure.rounds = (structure.rounds || []).map((round) => ({
+    ...round,
+    matches: (round.matches || []).map((m) => apply(m, m.bracket_match_ref)),
+  }));
 
-    if (!destId && n.next_public_node_id != null && n.next_public_node_id !== "") {
-      const ref = String(n.next_public_node_id);
-      const dest =
-        nodesByKey.get(ref) ||
-        nodesById.get(toInt(ref)) ||
-        allNodes.find((x) => String(x.public_node_id) === ref);
-      if (dest) destId = Number(dest.id);
-    }
-
-    if (destId) pushFeeder(destId, sourceKey, sourcePos);
+  if (structure.third_place_match) {
+    structure.third_place_match = apply(
+      structure.third_place_match,
+      structure.third_place_match.bracket_match_ref || "B3M1",
+      { thirdPlace: true }
+    );
   }
 
-  // 2) SE structure inference when graph is sparse/missing
-  for (let r = 1; r < mainRoundNodes.length; r += 1) {
-    const prev = mainRoundNodes[r - 1];
-    const curr = mainRoundNodes[r];
-    for (let i = 0; i < curr.length; i += 1) {
-      const dest = curr[i];
-      const destId = Number(dest.id);
-      const existing = feedersByDestId.get(destId) || [];
-      if (existing.length >= 2) continue;
-
-      const a = prev[i * 2];
-      const b = prev[i * 2 + 1];
-      if (a) pushFeeder(destId, a._key, toInt(a.position) || i * 2);
-      if (b) pushFeeder(destId, b._key, toInt(b.position) || i * 2 + 1);
-    }
+  // Waiting labels: prefer feeder live match_no (Controller attachWaitingLabels style),
+  // else generator display_match_no of the source ref.
+  const displayNoByRef = buildDisplayNoByRef(structure);
+  const waitingNoByRef = new Map(displayNoByRef);
+  for (const [ref, no] of liveMatchNoByRef.entries()) {
+    waitingNoByRef.set(ref, no);
   }
 
-  // Normalize to two slots
-  const result = new Map();
-  for (const [destId, list] of feedersByDestId.entries()) {
-    result.set(destId, {
-      source_a_ref: list[0]?.key || null,
-      source_b_ref: list[1]?.key || null,
+  const fillWaiting = (match, { thirdPlace = false } = {}) => {
+    const sourceA = match.source_a_ref || match.team_a_source_ref;
+    const sourceB = match.source_b_ref || match.team_b_source_ref;
+    let teamAName = match.team_a_name;
+    let teamBName = match.team_b_name;
+
+    const needsWaiting = (n, teamId) => {
+      if (teamId) return false;
+      if (!n) return true;
+      const s = String(n);
+      return (
+        s === "TBD" ||
+        s.startsWith("Winner of ") ||
+        s.startsWith("Loser of ") ||
+        s.startsWith("Waiting:")
+      );
+    };
+
+    if (needsWaiting(teamAName, match.team_a_id)) {
+      teamAName = waitingLabel(sourceA, waitingNoByRef, thirdPlace ? "loser" : "winner");
+    }
+    if (needsWaiting(teamBName, match.team_b_id)) {
+      teamBName = waitingLabel(sourceB, waitingNoByRef, thirdPlace ? "loser" : "winner");
+    }
+
+    if (String(match.team_a_name || "").toUpperCase() === "BYE") teamAName = "BYE";
+    if (String(match.team_b_name || "").toUpperCase() === "BYE") teamBName = "BYE";
+
+    return {
+      ...match,
+      team_a_name: teamAName || "TBD",
+      team_b_name: teamBName || "TBD",
+      display_match_no:
+        match.display_match_no ??
+        displayNoByRef.get(match.bracket_match_ref) ??
+        match.bracket_match_no,
+    };
+  };
+
+  structure.rounds = (structure.rounds || []).map((round) => ({
+    ...round,
+    matches: (round.matches || []).map((m) => fillWaiting(m)),
+  }));
+  if (structure.third_place_match) {
+    structure.third_place_match = fillWaiting(structure.third_place_match, {
+      thirdPlace: true,
     });
   }
-  return result;
-}
 
-function teamLabel(row, side) {
-  if (!row) return null;
-  if (side === "a") {
-    const name = row.blue_team_name || row.blue_team_shortname;
-    if (name) return name;
-    if (row.blue_team_id) return `Team #${row.blue_team_id}`;
-    return null;
-  }
-  const name = row.red_team_name || row.red_team_shortname;
-  if (name) return name;
-  if (row.red_team_id) return `Team #${row.red_team_id}`;
-  return null;
-}
-
-function buildMatchCard(node, feeders, displayNoByKey) {
-  const destId = Number(node.id);
-  const key = node._key;
-  const feeder = feeders.get(destId) || { source_a_ref: null, source_b_ref: null };
-
-  const teamAId = toInt(node.blue_team_id);
-  const teamBId = toInt(node.red_team_id);
-  let teamAName = teamLabel(node, "a");
-  let teamBName = teamLabel(node, "b");
-
-  const formatWaiting = (sourceRef) => {
-    if (!sourceRef) return "TBD";
-    const disp = displayNoByKey.get(sourceRef);
-    if (disp) return `Waiting: Winner of Match ${disp}`;
-    return `Waiting: Winner of ${sourceRef}`;
-  };
-
-  if (!teamAId && !teamAName) {
-    teamAName = formatWaiting(feeder.source_a_ref);
-  }
-  if (!teamBId && !teamBName) {
-    teamBName = formatWaiting(feeder.source_b_ref);
-  }
-
-  const finished =
-    isTruthyFlag(node.series_completed) ||
-    isFinishedStatus(node.match_status) ||
-    Boolean(node.series_winner_team_id);
-
-  const displayNo =
-    toInt(node.match_no) ||
-    toInt(node.position) ||
-    toInt(node._displayNo) ||
-    destId;
-
-  return {
-    bracket_match_ref: key,
-    bracket_match_no: displayNo,
-    display_match_no: displayNo,
-    team_a_id: teamAId,
-    team_b_id: teamBId,
-    team_a_name: teamAName,
-    team_b_name: teamBName,
-    seed_a: node.seed_a ?? null,
-    seed_b: node.seed_b ?? null,
-    team_a_source_ref: feeder.source_a_ref,
-    team_b_source_ref: feeder.source_b_ref,
-    // Connectors in BracketTreePreview use these exact keys
-    source_a_ref: feeder.source_a_ref,
-    source_b_ref: feeder.source_b_ref,
-    blue_score: node.blue_score != null ? node.blue_score : null,
-    red_score: node.red_score != null ? node.red_score : null,
-    series_winner_team_id: node.series_winner_team_id ?? null,
-    is_finished: finished,
-    match_status: node.match_status || null,
-    match_id: node.match_db_id || node.match_id || null,
-    mode: node.series_format || node.match_mode || null,
-    should_display: true,
-    label: node.label || null,
-  };
+  return structure;
 }
 
 /**
- * Attach match + team fields onto nodes using multiple join strategies.
- */
-async function hydrateNodesWithMatches(connection, nodes) {
-  // Primary join already done; fill gaps via public_match_id / match_id
-  for (const n of nodes) {
-    if (n.match_db_id) continue;
-    const candidates = [n.match_id, n.public_match_id].map(toInt).filter(Boolean);
-    for (const cid of candidates) {
-      try {
-        const [mrows] = await connection.query(
-          `SELECT m.id AS match_db_id,
-                  m.match_no,
-                  m.title AS match_title,
-                  m.mode AS match_mode,
-                  m.series_format,
-                  m.status AS match_status,
-                  m.blue_team_id,
-                  m.red_team_id,
-                  m.blue_score,
-                  m.red_score,
-                  m.series_winner_team_id,
-                  m.series_completed,
-                  bt.name AS blue_team_name,
-                  bt.shortname AS blue_team_shortname,
-                  rt.name AS red_team_name,
-                  rt.shortname AS red_team_shortname
-           FROM matches m
-           LEFT JOIN teams bt ON bt.id = m.blue_team_id
-           LEFT JOIN teams rt ON rt.id = m.red_team_id
-           WHERE m.id = ? OR m.public_match_id = ?
-           LIMIT 1`,
-          [cid, cid]
-        );
-        if (mrows[0]) {
-          Object.assign(n, mrows[0]);
-          break;
-        }
-      } catch (_) {
-        /* ignore */
-      }
-    }
-  }
-  return nodes;
-}
-
-/**
- * GET /api/brackets/:id/preview
+ * GET /api/brackets/:id/preview  (Controller-parity)
  */
 router.get("/:id/preview", async (req, res) => {
   const connection = await db.getConnection();
   try {
-    const bracket = await loadBracket(connection, req.params.id);
-    if (!bracket) {
+    const bracketRow = await loadBracket(connection, req.params.id);
+    if (!bracketRow) {
       return res.status(404).json({ success: false, message: "Bracket not found" });
     }
 
-    const bracketId = Number(bracket.id);
-    const { tournamentName, modeName } = await loadTournamentMeta(
-      connection,
-      bracket.tournament_id,
-      bracket.tournament_mode_id
-    );
+    const bracketId = Number(bracketRow.id);
 
-    // —— Rounds ——
-    let roundsRows = [];
-    const roundQueries = [
-      `SELECT * FROM bracket_rounds WHERE bracket_id = ? ORDER BY round_number ASC, sort_order ASC, id ASC`,
-      `SELECT * FROM bracket_rounds WHERE bracket_id = ? ORDER BY round_no ASC, id ASC`,
-      `SELECT * FROM bracket_rounds WHERE bracket_id = ? ORDER BY id ASC`,
+    let tournamentName = null;
+    let tournamentModeName = null;
+    try {
+      if (bracketRow.tournament_id) {
+        const [t] = await connection.query(`SELECT name FROM tournaments WHERE id = ? LIMIT 1`, [
+          bracketRow.tournament_id,
+        ]);
+        tournamentName = t[0]?.name || null;
+      }
+      if (bracketRow.tournament_mode_id) {
+        const [m] = await connection.query(
+          `SELECT name FROM tournament_modes WHERE id = ? LIMIT 1`,
+          [bracketRow.tournament_mode_id]
+        );
+        tournamentModeName = m[0]?.name || null;
+      }
+    } catch (_) {
+      /* optional */
+    }
+
+    let settings = {};
+    try {
+      settings =
+        typeof bracketRow.settings_json === "string"
+          ? JSON.parse(bracketRow.settings_json)
+          : bracketRow.settings_json || {};
+    } catch {
+      settings = {};
+    }
+
+    // Group stage guard
+    if (
+      bracketRow.name === "CODM BR Group Stage" ||
+      settings.groupA_team_ids ||
+      settings.groupB_team_ids
+    ) {
+      return res.json({
+        success: true,
+        bracket_id: bracketId,
+        bracket_name: bracketRow.name || null,
+        tournament_name: tournamentName,
+        tournament_mode_name: tournamentModeName,
+        is_group_stage: true,
+        bracket: null,
+        message: "Group stage brackets do not have a single-elimination tree preview.",
+      });
+    }
+
+    // Seeds (Controller table: bracket_seeds) — preferred source for generator tree
+    let seeds = [];
+    const seedQueries = [
+      `SELECT bs.team_id, bs.seed_no,
+              COALESCE(t.name, bs.team_name) AS name
+       FROM bracket_seeds bs
+       LEFT JOIN teams t ON t.id = bs.team_id
+       WHERE bs.bracket_id = ?
+       ORDER BY bs.seed_no ASC`,
+      `SELECT bs.team_id, bs.seed_no, t.name
+       FROM bracket_seeds bs
+       LEFT JOIN teams t ON t.id = bs.team_id
+       WHERE bs.bracket_id = ?
+       ORDER BY bs.seed_no ASC`,
+      `SELECT team_id, seed_no, team_name AS name
+       FROM bracket_seeds
+       WHERE bracket_id = ?
+       ORDER BY seed_no ASC`,
     ];
-    for (const sql of roundQueries) {
+    for (const sql of seedQueries) {
       try {
-        const [rows] = await connection.query(sql, [bracketId]);
-        roundsRows = rows;
+        const [seedRows] = await connection.query(sql, [bracketId]);
+        seeds = seedRows;
         break;
-      } catch (_) {
-        /* try next */
+      } catch (seedErr) {
+        console.warn("[brackets] seeds query variant failed:", seedErr.message);
       }
     }
 
-    // —— Nodes (+ matches/teams) ——
-    let nodes = [];
-    const nodeQueries = [
-      `SELECT bn.*,
-              m.id AS match_db_id,
-              m.match_no,
-              m.title AS match_title,
-              m.mode AS match_mode,
-              m.series_format,
-              m.status AS match_status,
-              m.blue_team_id,
-              m.red_team_id,
-              m.blue_score,
-              m.red_score,
-              m.series_winner_team_id,
-              m.series_completed,
-              bt.name AS blue_team_name,
-              bt.shortname AS blue_team_shortname,
-              rt.name AS red_team_name,
-              rt.shortname AS red_team_shortname
-       FROM bracket_nodes bn
-       LEFT JOIN matches m
-         ON m.id = bn.match_id
-         OR (bn.public_match_id IS NOT NULL AND m.public_match_id = bn.public_match_id)
-         OR (bn.public_match_id IS NOT NULL AND m.id = bn.public_match_id)
-       LEFT JOIN teams bt ON bt.id = m.blue_team_id
-       LEFT JOIN teams rt ON rt.id = m.red_team_id
-       WHERE bn.bracket_id = ?
-       ORDER BY bn.id ASC`,
-      `SELECT bn.*,
-              m.id AS match_db_id,
-              m.match_no,
-              m.title AS match_title,
-              m.mode AS match_mode,
-              m.series_format,
-              m.status AS match_status,
-              m.blue_team_id,
-              m.red_team_id,
-              m.blue_score,
-              m.red_score,
-              m.series_winner_team_id,
-              m.series_completed,
-              bt.name AS blue_team_name,
-              bt.shortname AS blue_team_shortname,
-              rt.name AS red_team_name,
-              rt.shortname AS red_team_shortname
-       FROM bracket_nodes bn
-       LEFT JOIN matches m ON m.id = bn.match_id
-       LEFT JOIN teams bt ON bt.id = m.blue_team_id
-       LEFT JOIN teams rt ON rt.id = m.red_team_id
-       WHERE bn.bracket_id = ?
-       ORDER BY bn.id ASC`,
-      `SELECT * FROM bracket_nodes WHERE bracket_id = ? ORDER BY id ASC`,
-    ];
-    for (const sql of nodeQueries) {
-      try {
-        const [rows] = await connection.query(sql, [bracketId]);
-        nodes = rows;
-        break;
-      } catch (_) {
-        /* try next */
-      }
-    }
-
-    await hydrateNodesWithMatches(connection, nodes);
-
-    // Group by round
-    const roundsMeta =
-      roundsRows.length > 0
-        ? roundsRows
-        : [{ id: 0, name: "Bracket", round_number: 1, round_no: 1 }];
-
-    const nodesByRoundId = new Map();
-    for (const n of nodes) {
-      const rid = n.round_id != null ? Number(n.round_id) : 0;
-      if (!nodesByRoundId.has(rid)) nodesByRoundId.set(rid, []);
-      nodesByRoundId.get(rid).push(n);
-    }
-
-    // Prepare ordered main rounds + third place
-    const preparedMain = [];
-    let thirdPlaceNodes = [];
-
-    for (const r of roundsMeta) {
-      const rid = r.id != null ? Number(r.id) : 0;
-      const roundNodes = sortNodes(nodesByRoundId.get(rid) || []);
-      if (!roundNodes.length && rid !== 0) continue;
-
-      const roundNo =
-        toInt(r.round_number) ||
-        toInt(r.round_no) ||
-        toInt(r.sort_order) ||
-        preparedMain.length + 1;
-
-      if (isThirdPlaceRound(r)) {
-        thirdPlaceNodes = roundNodes.map((n, idx) => {
-          n._key = nodeKeyOf(n, roundNo, idx);
-          n._roundNo = roundNo;
-          n._roundTitle = r.name || "Battle for Third";
-          n._roundMode = r.default_series_format || null;
-          return n;
-        });
-        continue;
-      }
-
-      const labeled = roundNodes.map((n, idx) => {
-        n._key = nodeKeyOf(n, roundNo, idx);
-        n._roundNo = roundNo;
-        n._roundTitle = r.name || `Round ${roundNo}`;
-        n._roundMode = r.default_series_format || null;
-        return n;
-      });
-
-      preparedMain.push({
-        round_no: roundNo,
-        title: r.name || `Round ${roundNo}`,
-        mode: r.default_series_format || null,
-        nodes: labeled,
-      });
-    }
-
-    // Orphans
-    const orphan = sortNodes(nodesByRoundId.get(0) || []);
-    if (orphan.length && roundsRows.length) {
-      const roundNo = preparedMain.length + 1;
-      preparedMain.push({
-        round_no: roundNo,
-        title: "Other Matches",
-        mode: null,
-        nodes: orphan.map((n, idx) => {
-          n._key = nodeKeyOf(n, roundNo, idx);
-          n._roundNo = roundNo;
-          return n;
-        }),
-      });
-    } else if (orphan.length && !roundsRows.length && preparedMain.length === 0) {
-      preparedMain.push({
-        round_no: 1,
-        title: "Bracket",
-        mode: null,
-        nodes: orphan.map((n, idx) => {
-          n._key = nodeKeyOf(n, 1, idx);
-          n._roundNo = 1;
-          return n;
-        }),
-      });
-    }
-
-    // Sort main rounds by round_no
-    preparedMain.sort((a, b) => a.round_no - b.round_no);
-
-    // Assign sequential display numbers (for Winner of Match N labels)
-    let displayCounter = 0;
-    const displayNoByKey = new Map();
-    for (const round of preparedMain) {
-      for (const n of round.nodes) {
-        displayCounter += 1;
-        const dn = toInt(n.match_no) || displayCounter;
-        n._displayNo = dn;
-        displayNoByKey.set(n._key, dn);
-      }
-    }
-    for (const n of thirdPlaceNodes) {
-      displayCounter += 1;
-      const dn = toInt(n.match_no) || displayCounter;
-      n._displayNo = dn;
-      displayNoByKey.set(n._key, dn);
-    }
-
-    const allLabeledNodes = [
-      ...preparedMain.flatMap((r) => r.nodes),
-      ...thirdPlaceNodes,
-    ];
-    const mainRoundNodes = preparedMain.map((r) => r.nodes);
-    const feeders = resolveFeeders(mainRoundNodes, allLabeledNodes);
-
-    // Build Controller-compatible preview structure
-    const previewRounds = preparedMain.map((r) => {
-      const matches = r.nodes.map((n) => buildMatchCard(n, feeders, displayNoByKey));
-      const modeFromMatch =
-        matches.find((m) => m.mode)?.mode ||
-        r.nodes.find((n) => n.series_format || n.match_mode)?.series_format ||
-        r.nodes.find((n) => n.match_mode)?.match_mode ||
-        r.mode ||
-        "—";
-      return {
-        round_no: r.round_no,
-        title: r.title,
-        mode: modeFromMatch,
-        matches,
-      };
-    });
-
-    let thirdPlaceMatch = null;
-    if (thirdPlaceNodes.length) {
-      const n = thirdPlaceNodes[0];
-      // Third place feeders: usually losers of semis — if no explicit links, leave TBD
-      // or use last main round as loser sources (best-effort)
-      if (!feeders.has(Number(n.id)) && preparedMain.length >= 2) {
-        const semis = preparedMain[preparedMain.length - 2]?.nodes || [];
-        if (semis.length >= 2) {
-          feeders.set(Number(n.id), {
-            source_a_ref: semis[0]._key,
-            source_b_ref: semis[1]._key,
+    if (seeds.length < 2) {
+      // Try building participants from R1 nodes/matches
+      const live = await loadLiveNodesByKey(connection, bracketId);
+      const r1 = live
+        .filter((n) => String(n.node_key || "").startsWith("R1"))
+        .sort((a, b) => String(a.node_key).localeCompare(String(b.node_key)));
+      const participants = [];
+      let seed = 1;
+      for (const n of r1) {
+        if (n.blue_team_id) {
+          participants.push({
+            team_id: Number(n.blue_team_id),
+            seed: seed++,
+            name: n.blue_team_name || n.blue_team_short || `Team ${n.blue_team_id}`,
+          });
+        }
+        if (n.red_team_id) {
+          participants.push({
+            team_id: Number(n.red_team_id),
+            seed: seed++,
+            name: n.red_team_name || n.red_team_short || `Team ${n.red_team_id}`,
           });
         }
       }
-      const card = buildMatchCard(n, feeders, displayNoByKey);
-      // Third place waiting uses Loser of when no teams yet
-      if (
-        !card.team_a_id &&
-        typeof card.team_a_name === "string" &&
-        card.team_a_name.startsWith("Waiting: Winner of")
-      ) {
-        card.team_a_name = card.team_a_name.replace("Winner of", "Loser of");
+      if (participants.length < 2) {
+        return res.status(400).json({
+          success: false,
+          message: "Bracket has fewer than 2 seeds; cannot build preview",
+        });
       }
-      if (
-        !card.team_b_id &&
-        typeof card.team_b_name === "string" &&
-        card.team_b_name.startsWith("Waiting: Winner of")
-      ) {
-        card.team_b_name = card.team_b_name.replace("Winner of", "Loser of");
-      }
-      thirdPlaceMatch = {
-        ...card,
-        mode: n._roundMode || card.mode || "—",
-        is_third_place: true,
-      };
+      seeds = participants.map((p) => ({
+        team_id: p.team_id,
+        seed_no: p.seed,
+        name: p.name,
+      }));
     }
 
-    // Stats
-    let participantCount = 0;
+    const roundModes = settings.roundModes || {};
+    const options = settings.options || {};
+    const participants = seeds.map((s) => ({
+      team_id: Number(s.team_id),
+      seed: Number(s.seed_no ?? s.seed),
+      name: s.name || `Team ${s.team_id}`,
+    }));
+
+    let structure = generateSingleEliminationBracket(participants, {
+      roundModes,
+      bracketType: options.bracketType || bracketRow.bracket_type || "single_elimination",
+      seedingMode: options.seedingMode || "manual",
+      includeThirdPlace:
+        options.includeThirdPlace != null
+          ? options.includeThirdPlace
+          : Boolean(bracketRow.third_place_enabled),
+      thirdPlaceMode: roundModes["Battle for Third"],
+    });
+
+    // Overlay live match state by node_key (R1M1, R2M1, B3M1, …)
     try {
-      const [seedRows] = await connection.query(
-        `SELECT COUNT(*) AS c FROM bracket_seeds WHERE bracket_id = ?`,
-        [bracketId]
-      );
-      participantCount = Number(seedRows[0]?.c || seedRows[0]?.C || 0);
-    } catch (_) {
-      const ids = new Set();
-      for (const n of allLabeledNodes) {
-        if (n.blue_team_id) ids.add(Number(n.blue_team_id));
-        if (n.red_team_id) ids.add(Number(n.red_team_id));
-      }
-      participantCount = ids.size;
+      const liveRows = await loadLiveNodesByKey(connection, bracketId);
+      structure = applyLiveOverlay(structure, liveRows);
+    } catch (overlayErr) {
+      console.warn("[brackets] live overlay skipped:", overlayErr.message);
     }
-
-    const firstCount = previewRounds[0]?.matches?.length || 0;
-    const bracketSize =
-      firstCount > 0 ? Math.pow(2, Math.ceil(Math.log2(Math.max(firstCount, 1)))) : null;
-
-    // Count byes (BYE labels or single-team finished first round)
-    let byes = 0;
-    for (const m of previewRounds[0]?.matches || []) {
-      if (
-        String(m.team_a_name).toUpperCase() === "BYE" ||
-        String(m.team_b_name).toUpperCase() === "BYE"
-      ) {
-        byes += 1;
-      }
-    }
-
-    const structure = {
-      bracket_size: bracketSize,
-      participant_count: participantCount || null,
-      byes: byes || null,
-      rounds: previewRounds,
-      third_place_match: thirdPlaceMatch,
-    };
 
     res.json({
       success: true,
       bracket_id: bracketId,
-      public_bracket_id: bracket.public_bracket_id || null,
-      bracket_name: bracket.name || "Tournament Bracket",
+      public_bracket_id: bracketRow.public_bracket_id || null,
+      bracket_name: bracketRow.name || "Tournament Bracket",
       tournament_name: tournamentName,
-      tournament_mode_name: modeName,
+      tournament_mode_name: tournamentModeName,
       is_group_stage: false,
       bracket: structure,
-      // debug helpers for troubleshooting (harmless for UI)
-      meta: {
-        rounds_loaded: roundsRows.length,
-        nodes_loaded: nodes.length,
-        feeders: feeders.size,
-      },
     });
   } catch (error) {
     console.error("Failed to build public bracket preview", error);
@@ -631,9 +529,7 @@ router.get("/:id/preview", async (req, res) => {
   }
 });
 
-/**
- * GET /api/brackets — list for picker links
- */
+/** GET /api/brackets — list */
 router.get("/", async (req, res) => {
   try {
     const [rows] = await db.query(

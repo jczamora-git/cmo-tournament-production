@@ -155,6 +155,34 @@ async function ensureSyncSchema(connection = db) {
         CREATE UNIQUE INDEX IF NOT EXISTS uq_bracket_nodes_public_node_id
         ON bracket_nodes (public_node_id) WHERE public_node_id IS NOT NULL
       `);
+
+      // Seeds drive generator tree + match numbering on public bracket-preview
+      await connection.query(`
+        CREATE TABLE IF NOT EXISTS bracket_seeds (
+          id SERIAL PRIMARY KEY,
+          bracket_id INTEGER NOT NULL REFERENCES brackets(id) ON DELETE CASCADE,
+          public_bracket_id INTEGER,
+          seed_no INTEGER NOT NULL,
+          team_id INTEGER,
+          status VARCHAR(50) DEFAULT 'active',
+          team_name VARCHAR(255),
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+      `);
+      await connection.query(
+        `ALTER TABLE bracket_seeds ADD COLUMN IF NOT EXISTS public_bracket_id INTEGER`
+      );
+      await connection.query(
+        `ALTER TABLE bracket_seeds ADD COLUMN IF NOT EXISTS team_name VARCHAR(255)`
+      );
+      await connection.query(
+        `ALTER TABLE bracket_seeds ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'active'`
+      );
+      await connection.query(`
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_bracket_seeds_bracket_seed
+        ON bracket_seeds (bracket_id, seed_no)
+      `);
     } else {
       // MySQL: best-effort column adds
       try {
@@ -228,6 +256,21 @@ async function ensureSyncSchema(connection = db) {
           UNIQUE KEY uq_bracket_nodes_public_id (public_node_id),
           KEY idx_bracket_nodes_bracket_id (bracket_id),
           KEY idx_bracket_nodes_public_match_id (public_match_id)
+        )
+      `);
+      await connection.query(`
+        CREATE TABLE IF NOT EXISTS bracket_seeds (
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          bracket_id INT NOT NULL,
+          public_bracket_id INT NULL,
+          seed_no INT NOT NULL,
+          team_id INT NULL,
+          status VARCHAR(50) DEFAULT 'active',
+          team_name VARCHAR(255) NULL,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          UNIQUE KEY uq_bracket_seeds_bracket_seed (bracket_id, seed_no),
+          KEY idx_bracket_seeds_bracket_id (bracket_id)
         )
       `);
     }
