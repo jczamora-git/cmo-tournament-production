@@ -21,6 +21,7 @@ const publicSettingsRoutes = require("./routes/public.settings.routes");
 const adminSettingsRoutes = require("./routes/admin.settings.routes");
 const syncRoutes = require("./routes/sync.routes");
 const standingsRoutes = require("./routes/standings.routes");
+const bracketsRoutes = require("./routes/brackets.routes");
 
 function buildCorsOptions() {
   const allowedOrigins = [
@@ -80,6 +81,7 @@ function createApp({ restrictedCors = false } = {}) {
   // Public read-only routes
   app.use("/api/teams", teamsRoutes);
   app.use("/api/matches", matchesRoutes);
+  app.use("/api/brackets", bracketsRoutes);
   app.use("/api/live-settings", liveSettingsRoutes);
   app.use("/api/tournaments", tournamentsRoutes);
   app.use("/api/videos", videosRoutes);

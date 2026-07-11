@@ -5,6 +5,7 @@ import UploadTeam from "./pages/UploadTeam";
 import ViewSchedule from "./pages/ViewSchedule";
 import ViewHistory from "./pages/ViewHistory";
 import ViewBracket from "./pages/ViewBracket";
+import ViewBracketPreview from "./pages/ViewBracketPreview";
 import ViewStandings from "./pages/ViewStandings";
 import WatchLive from "./pages/WatchLive";
 import ViewTournaments from "./pages/ViewTournaments";
@@ -33,6 +34,7 @@ function PublicApp() {
             <Route path="/matches" element={<Navigate to="/schedule" replace />} />
             <Route path="/history" element={<ViewHistory />} />
             <Route path="/bracket" element={<ViewBracket />} />
+            <Route path="/bracket-preview" element={<ViewBracketPreview />} />
             <Route path="/standings" element={<ViewStandings />} />
             <Route path="/br-standings" element={<ViewStandings />} />
             <Route path="/live" element={<WatchLive />} />

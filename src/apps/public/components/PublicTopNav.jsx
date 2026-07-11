@@ -16,6 +16,7 @@ const navItems = [
   { to: "/schedule", label: "Schedule" },
   { to: "/history", label: "History" },
   { to: "/bracket", label: "Bracket" },
+  { to: "/bracket-preview", label: "Bracket Preview" },
   { to: "/standings", label: "Standings" },
   { to: "/live", label: "Watch Live" },
 ];

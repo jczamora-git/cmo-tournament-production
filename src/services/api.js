@@ -71,8 +71,11 @@ function qs(params) {
 export const getTeams = (params) => request(`/teams${qs(params)}`);
 export const getMatches = () => request("/matches");
 export const getUpcomingMatches = () => request("/matches/upcoming");
-export const getMatchHistory = () => request("/matches/history");
+export const getMatchHistory = (params) => request(`/matches/history${qs(params)}`);
 export const getMatchBracket = () => request("/matches/bracket");
+export const getBrackets = () => request("/brackets");
+export const getBracketPreview = (bracketId) =>
+  request(`/brackets/${encodeURIComponent(bracketId)}/preview`);
 export const getPublicLiveSettings = () => request("/live-settings");
 export const getTournaments = (params) => request(`/tournaments${qs(params)}`);
 export const getTournamentBySlug = (slug) => request(`/tournaments/${slug}`);
