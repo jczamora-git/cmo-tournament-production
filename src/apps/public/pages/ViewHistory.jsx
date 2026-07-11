@@ -1,31 +1,70 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
-import { Loader2, RefreshCw, ScrollText, Search } from "lucide-react";
+import { Loader2, RefreshCw, ScrollText, Search, Trophy } from "lucide-react";
 import { getMatchHistory } from "../../../services/api";
 import EmptyState from "../../admin/components/EmptyState";
 import LoadingState from "../../admin/components/LoadingState";
 
-function TeamDisplay({ name, shortname, id, logo, isRed, isWinner }) {
+function TeamSide({ name, shortname, id, logo, isRed, isWinner }) {
   const label = shortname || name || (id ? `Team ${id}` : "TBD");
-  const fallbackInitial = label.charAt(0).toUpperCase();
+  const fullName = name && shortname && name !== shortname ? name : null;
+  const fallbackInitial = String(label).charAt(0).toUpperCase();
   const [imgError, setImgError] = useState(false);
 
   return (
     <div
-      className={`admin-match-team ${isRed ? "is-red" : ""} ${isWinner ? "is-winner" : ""}`}
+      className={[
+        "public-esports-team",
+        isRed ? "is-red" : "",
+        isWinner ? "is-winner" : "",
+      ]
+        .filter(Boolean)
+        .join(" ")}
     >
       {logo && !imgError ? (
         <img
           src={logo}
-          alt={`${label} logo`}
-          className="admin-match-team-logo"
+          alt=""
+          className="public-esports-logo"
           onError={() => setImgError(true)}
         />
       ) : (
-        <div className="admin-match-team-fallback">{fallbackInitial}</div>
+        <div className="public-esports-logo-fallback" aria-hidden="true">
+          {fallbackInitial}
+        </div>
       )}
-      <span className="admin-match-team-name">{label}</span>
+      <div className="public-esports-team-meta">
+        <span className="public-esports-team-name" title={name || label}>
+          {label}
+        </span>
+        {fullName ? <span className="public-esports-team-sub">{fullName}</span> : null}
+        {isWinner ? <span className="public-esports-team-sub">Winner</span> : null}
+      </div>
     </div>
   );
+}
+
+function formatFinishedAt(value) {
+  if (!value) return null;
+  try {
+    const d = new Date(value);
+    if (Number.isNaN(d.getTime())) return null;
+    return d.toLocaleString(undefined, {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  } catch {
+    return null;
+  }
+}
+
+function roundLabel(match) {
+  const title = match.title || match.round_name || null;
+  const matchNo = match.match_no != null ? match.match_no : match.id;
+  if (title) return `${title} · Match #${matchNo}`;
+  return `Match #${matchNo}`;
 }
 
 function ViewHistory() {
@@ -35,6 +74,7 @@ function ViewHistory() {
   const [error, setError] = useState("");
   const [query, setQuery] = useState("");
   const [searchInput, setSearchInput] = useState("");
+  const [lastUpdated, setLastUpdated] = useState(null);
 
   const load = useCallback(async (q = "", { silent = false } = {}) => {
     if (silent) setRefreshing(true);
@@ -43,6 +83,7 @@ function ViewHistory() {
       const data = await getMatchHistory(q ? { q } : undefined);
       setMatches(Array.isArray(data) ? data : []);
       setError("");
+      setLastUpdated(new Date());
     } catch (err) {
       if (!silent) setError(err.message);
     } finally {
@@ -55,75 +96,106 @@ function ViewHistory() {
     load(query);
   }, [load, query]);
 
-  const filteredLocal = useMemo(() => {
-    // Server already filters when q is set; keep client fallback
-    return matches;
-  }, [matches]);
+  const filteredLocal = useMemo(() => matches, [matches]);
 
   const handleSearch = (e) => {
     e.preventDefault();
     setQuery(searchInput.trim());
   };
 
-  if (loading) return <LoadingState message="Loading history..." />;
+  const handleClearSearch = () => {
+    setSearchInput("");
+    setQuery("");
+  };
+
+  if (loading) return <LoadingState message="Loading history…" />;
   if (error) {
     return (
-      <div>
-        <h1>Match History</h1>
+      <div className="public-esports-page">
+        <header className="public-esports-hero">
+          <div className="public-esports-kicker">
+            <ScrollText size={12} aria-hidden="true" />
+            History
+          </div>
+          <h1>Match History</h1>
+        </header>
         <div className="admin-error-message">{error}</div>
-        <button type="button" className="public-bracket-refresh-btn" onClick={() => load(query)}>
-          <RefreshCw size={16} /> Try again
+        <button
+          type="button"
+          className="public-bracket-refresh-btn"
+          onClick={() => load(query)}
+        >
+          <RefreshCw size={16} aria-hidden="true" /> Try again
         </button>
       </div>
     );
   }
 
   return (
-    <div>
-      <header className="public-page-header">
+    <div className="public-esports-page">
+      <header className="public-esports-hero">
+        <div className="public-esports-kicker">
+          <Trophy size={12} aria-hidden="true" />
+          Results Archive
+        </div>
         <h1>Match History</h1>
-        <p>Finished matches with final scores and winners.</p>
+        <p>
+          Finished matches with final scores, winners, and series format. Search by team, stage,
+          or mode.
+        </p>
       </header>
 
-      <div className="public-matches-toolbar">
-        <form onSubmit={handleSearch} style={{ display: "flex", gap: 8, flex: "1 1 260px" }}>
-          <div style={{ position: "relative", flex: 1, maxWidth: 360 }}>
-            <Search
-              size={15}
-              style={{
-                position: "absolute",
-                left: 14,
-                top: "50%",
-                transform: "translateY(-50%)",
-                opacity: 0.55,
-              }}
-            />
+      <div className="public-esports-toolbar">
+        <form className="public-esports-search-form" onSubmit={handleSearch}>
+          <div className="public-esports-search-wrap">
+            <Search size={15} aria-hidden="true" />
             <input
-              className="public-matches-search"
-              style={{ paddingLeft: 36, width: "100%", maxWidth: "none" }}
+              className="public-esports-search"
               type="search"
-              placeholder="Search team, title, mode…"
+              placeholder="Search team, round, mode…"
               value={searchInput}
               onChange={(e) => setSearchInput(e.target.value)}
+              aria-label="Search match history"
             />
           </div>
           <button type="submit" className="public-bracket-refresh-btn">
             Search
           </button>
+          {query ? (
+            <button
+              type="button"
+              className="public-bracket-refresh-btn"
+              onClick={handleClearSearch}
+            >
+              Clear
+            </button>
+          ) : null}
         </form>
-        <button
-          type="button"
-          className="public-bracket-refresh-btn"
-          onClick={() => load(query, { silent: true })}
-          disabled={refreshing}
-        >
-          {refreshing ? (
-            <Loader2 size={16} className="public-bracket-spin" />
-          ) : (
-            <RefreshCw size={16} />
-          )}
-          Refresh
-        </button>
+
+        <div className="public-esports-meta">
+          {lastUpdated ? (
+            <span className="public-esports-meta-item">
+              Updated {lastUpdated.toLocaleTimeString()}
+            </span>
+          ) : null}
+          <span className="public-esports-meta-item">
+            {filteredLocal.length} result{filteredLocal.length === 1 ? "" : "s"}
+            {query ? ` for “${query}”` : ""}
+          </span>
+          <button
+            type="button"
+            className="public-bracket-refresh-btn"
+            onClick={() => load(query, { silent: true })}
+            disabled={refreshing}
+          >
+            {refreshing ? (
+              <Loader2 size={16} className="public-bracket-spin" aria-hidden="true" />
+            ) : (
+              <RefreshCw size={16} aria-hidden="true" />
+            )}
+            Refresh
+          </button>
+        </div>
       </div>
 
       {filteredLocal.length === 0 ? (
@@ -137,7 +209,7 @@ function ViewHistory() {
           }
         />
       ) : (
-        <div className="admin-match-list">
+        <div className="public-esports-list">
           {filteredLocal.map((match) => {
             const winnerId = match.series_winner_team_id
               ? Number(match.series_winner_team_id)
@@ -147,60 +219,111 @@ function ViewHistory() {
             const winnerName = blueWon
               ? match.blue_team?.shortname ||
                 match.blue_team?.name ||
-                match.blue_team_name
+                match.blue_team_name ||
+                match.blue_team_shortname
               : redWon
                 ? match.red_team?.shortname ||
                   match.red_team?.name ||
-                  match.red_team_name
+                  match.red_team_name ||
+                  match.red_team_shortname
                 : null;
             const seriesFormat = match.series_format || match.mode;
+            const finishedAt = formatFinishedAt(
+              match.series_completed_at || match.finished_at || match.updated_at
+            );
+            const stage = match.title || match.round_name || null;
 
             return (
-              <div key={match.id} className="admin-match-card">
-                <div className="admin-match-card-header">
-                  <span className="admin-match-card-title">
-                    {match.title || `Match #${match.match_no ?? match.id}`}
-                  </span>
-                  <span className="status-badge status-finished">Finished</span>
-                </div>
-
-                <div className="admin-match-card-teams">
-                  <TeamDisplay
-                    name={match.blue_team_name || match.blue_team?.name}
-                    shortname={match.blue_team_shortname || match.blue_team?.shortname}
-                    id={match.blue_team_id}
-                    logo={match.blue_team_logo || match.blue_team?.logo}
-                    isRed={false}
-                    isWinner={blueWon}
-                  />
-
-                  <div className="admin-match-score-center">
-                    {match.blue_score ?? 0} - {match.red_score ?? 0}
-                  </div>
-
-                  <TeamDisplay
-                    name={match.red_team_name || match.red_team?.name}
-                    shortname={match.red_team_shortname || match.red_team?.shortname}
-                    id={match.red_team_id}
-                    logo={match.red_team_logo || match.red_team?.logo}
-                    isRed={true}
-                    isWinner={redWon}
-                  />
-                </div>
-
-                <div className="admin-match-card-footer">
-                  <div className="admin-match-card-meta">
-                    {seriesFormat ? (
-                      <span className="admin-match-mode-pill">{seriesFormat}</span>
-                    ) : null}
-                    {winnerName ? (
-                      <span className="helper-text" style={{ marginLeft: 8 }}>
-                        Winner: <span className="public-match-winner">{winnerName}</span>
+              <article key={match.id} className="public-esports-card is-finished">
+                <div className="public-esports-card-accent" aria-hidden="true" />
+                <div className="public-esports-card-inner">
+                  <div className="public-esports-card-top">
+                    <div className="public-esports-card-identity">
+                      {stage ? (
+                        <span className="public-esports-round">{stage}</span>
+                      ) : null}
+                      <span className="public-esports-match-no">{roundLabel(match)}</span>
+                    </div>
+                    <div className="public-esports-card-badges">
+                      <span className="public-esports-badge public-esports-badge-finished">
+                        Finished
                       </span>
-                    ) : null}
+                      {seriesFormat ? (
+                        <span className="public-esports-badge public-esports-badge-mode">
+                          {seriesFormat}
+                        </span>
+                      ) : null}
+                    </div>
+                  </div>
+
+                  <div className="public-esports-teams">
+                    <TeamSide
+                      name={match.blue_team_name || match.blue_team?.name}
+                      shortname={
+                        match.blue_team_shortname || match.blue_team?.shortname
+                      }
+                      id={match.blue_team_id}
+                      logo={match.blue_team_logo || match.blue_team?.logo}
+                      isRed={false}
+                      isWinner={blueWon}
+                    />
+
+                    <div className="public-esports-scoreboard">
+                      <div className="public-esports-score-row">
+                        <span
+                          className={[
+                            "public-esports-score",
+                            blueWon ? "is-winner" : "",
+                          ]
+                            .filter(Boolean)
+                            .join(" ")}
+                        >
+                          {match.blue_score ?? 0}
+                        </span>
+                        <span className="public-esports-vs">—</span>
+                        <span
+                          className={[
+                            "public-esports-score",
+                            redWon ? "is-winner" : "",
+                          ]
+                            .filter(Boolean)
+                            .join(" ")}
+                        >
+                          {match.red_score ?? 0}
+                        </span>
+                      </div>
+                    </div>
+
+                    <TeamSide
+                      name={match.red_team_name || match.red_team?.name}
+                      shortname={
+                        match.red_team_shortname || match.red_team?.shortname
+                      }
+                      id={match.red_team_id}
+                      logo={match.red_team_logo || match.red_team?.logo}
+                      isRed={true}
+                      isWinner={redWon}
+                    />
+                  </div>
+
+                  <div className="public-esports-card-footer">
+                    {winnerName ? (
+                      <div className="public-esports-winner">
+                        <Trophy size={14} aria-hidden="true" />
+                        Winner: <strong>{winnerName}</strong>
+                      </div>
+                    ) : (
+                      <div className="public-esports-winner">Series complete</div>
+                    )}
+                    <div className="public-esports-footer-meta">
+                      {finishedAt ? <span>{finishedAt}</span> : null}
+                      {match.match_no != null ? (
+                        <span>#{match.match_no}</span>
+                      ) : null}
+                    </div>
                   </div>
                 </div>
-              </div>
+              </article>
             );
           })}
         </div>

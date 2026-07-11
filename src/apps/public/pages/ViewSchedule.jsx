@@ -1,37 +1,82 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
-import { CalendarDays, Loader2, RefreshCw } from "lucide-react";
+import { CalendarDays, Clock, Loader2, Radio, RefreshCw } from "lucide-react";
 import { getUpcomingMatches } from "../../../services/api";
 import EmptyState from "../../admin/components/EmptyState";
 import LoadingState from "../../admin/components/LoadingState";
 
-function TeamDisplay({ name, shortname, id, logo, isRed, isWinner }) {
+function TeamSide({ name, shortname, id, logo, isRed, isWinner }) {
   const label = shortname || name || (id ? `Team ${id}` : "TBD");
-  const fallbackInitial = label.charAt(0).toUpperCase();
+  const fullName = name && shortname && name !== shortname ? name : null;
+  const fallbackInitial = String(label).charAt(0).toUpperCase();
   const [imgError, setImgError] = useState(false);
 
   return (
     <div
-      className={`admin-match-team ${isRed ? "is-red" : ""} ${isWinner ? "is-winner" : ""}`}
+      className={[
+        "public-esports-team",
+        isRed ? "is-red" : "",
+        isWinner ? "is-winner" : "",
+      ]
+        .filter(Boolean)
+        .join(" ")}
     >
       {logo && !imgError ? (
         <img
           src={logo}
-          alt={`${label} logo`}
-          className="admin-match-team-logo"
+          alt=""
+          className="public-esports-logo"
           onError={() => setImgError(true)}
         />
       ) : (
-        <div className="admin-match-team-fallback">{fallbackInitial}</div>
+        <div className="public-esports-logo-fallback" aria-hidden="true">
+          {fallbackInitial}
+        </div>
       )}
-      <span className="admin-match-team-name">{label}</span>
+      <div className="public-esports-team-meta">
+        <span className="public-esports-team-name" title={name || label}>
+          {label}
+        </span>
+        {fullName ? <span className="public-esports-team-sub">{fullName}</span> : null}
+        {isWinner ? <span className="public-esports-team-sub">Winner</span> : null}
+      </div>
     </div>
   );
 }
 
-function statusLabel(status) {
+function normalizeStatus(status) {
   const s = String(status || "queued").toLowerCase();
-  if (s === "live" || s === "active") return s.toUpperCase();
-  return s.toUpperCase();
+  if (["live", "active", "ongoing"].includes(s)) return "live";
+  if (["finished", "completed", "done"].includes(s)) return "finished";
+  if (["setup", "drafting"].includes(s)) return s;
+  return "queued";
+}
+
+function statusBadgeClass(status) {
+  if (status === "live") return "public-esports-badge public-esports-badge-live";
+  if (status === "finished") return "public-esports-badge public-esports-badge-finished";
+  return "public-esports-badge public-esports-badge-queued";
+}
+
+function statusLabel(status) {
+  if (status === "live") return "Live";
+  if (status === "finished") return "Finished";
+  if (status === "setup") return "Setup";
+  return "Queued";
+}
+
+function formatUpdated(date) {
+  if (!date) return null;
+  try {
+    return date.toLocaleString(undefined, {
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    });
+  } catch {
+    return date.toLocaleString();
+  }
 }
 
 function ViewSchedule() {
@@ -77,36 +122,56 @@ function ViewSchedule() {
     }, {});
   }, [matches]);
 
-  if (loading) return <LoadingState message="Loading matches..." />;
+  if (loading) return <LoadingState message="Loading schedule…" />;
   if (error) {
     return (
-      <div>
-        <h1>Schedule</h1>
+      <div className="public-esports-page">
+        <header className="public-esports-hero">
+          <div className="public-esports-kicker">
+            <CalendarDays size={12} aria-hidden="true" />
+            Schedule
+          </div>
+          <h1>Tournament Schedule</h1>
+        </header>
         <div className="admin-error-message">{error}</div>
         <button type="button" className="public-bracket-refresh-btn" onClick={() => load()}>
-          <RefreshCw size={16} /> Try again
+          <RefreshCw size={16} aria-hidden="true" /> Try again
         </button>
       </div>
     );
   }
 
   return (
-    <div>
-      <header className="public-page-header">
-        <h1>Schedule</h1>
-        <p>Upcoming and live matches from the Controller sync.</p>
+    <div className="public-esports-page">
+      <header className="public-esports-hero">
+        <div className="public-esports-kicker">
+          <CalendarDays size={12} aria-hidden="true" />
+          Live Schedule
+        </div>
+        <h1>Tournament Schedule</h1>
+        <p>
+          Upcoming and live matches synced from the Controller. Auto-refreshes while this page
+          is open.
+        </p>
       </header>
 
-      <div className="public-matches-toolbar">
-        <div className="helper-text" style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-          {lastUpdated
-            ? `Updated ${lastUpdated.toLocaleTimeString()}`
-            : null}
-          {refreshing ? (
-            <>
-              <Loader2 size={14} className="public-bracket-spin" /> Updating…
-            </>
+      <div className="public-esports-toolbar">
+        <div className="public-esports-meta">
+          {lastUpdated ? (
+            <span className="public-esports-meta-item">
+              <Clock size={14} aria-hidden="true" />
+              Last updated {formatUpdated(lastUpdated)}
+            </span>
           ) : null}
+          {refreshing ? (
+            <span className="public-esports-meta-item">
+              <Loader2 size={14} className="public-bracket-spin" aria-hidden="true" />
+              Updating…
+            </span>
+          ) : null}
+          <span className="public-esports-meta-item">
+            {matches.length} match{matches.length === 1 ? "" : "es"}
+          </span>
         </div>
         <button
           type="button"
@@ -114,7 +179,11 @@ function ViewSchedule() {
           onClick={() => load({ silent: true })}
           disabled={refreshing}
         >
-          <RefreshCw size={16} className={refreshing ? "public-bracket-spin" : undefined} />
+          <RefreshCw
+            size={16}
+            className={refreshing ? "public-bracket-spin" : undefined}
+            aria-hidden="true"
+          />
           Refresh
         </button>
       </div>
@@ -126,82 +195,116 @@ function ViewSchedule() {
           description="Check back later for scheduled matches."
         />
       ) : (
-        <div className="admin-match-list">
-          {Object.entries(groupedMatches).map(([stage, stageMatches]) => (
-            <div key={stage} style={{ marginBottom: "2rem" }}>
-              <h2 className="public-stage-heading">{stage}</h2>
-              <div className="admin-match-list">
-                {stageMatches.map((match) => {
-                  const seriesFormat = match.series_format || match.mode;
-                  const status = String(match.status || "queued").toLowerCase();
-                  const winnerId = match.series_winner_team_id
-                    ? Number(match.series_winner_team_id)
-                    : null;
+        Object.entries(groupedMatches).map(([stage, stageMatches]) => (
+          <section key={stage} className="public-esports-stage">
+            <h2 className="public-esports-stage-title">{stage}</h2>
+            <div className="public-esports-list">
+              {stageMatches.map((match) => {
+                const seriesFormat = match.series_format || match.mode;
+                const status = normalizeStatus(match.status);
+                const winnerId = match.series_winner_team_id
+                  ? Number(match.series_winner_team_id)
+                  : null;
+                const blueWon = winnerId && Number(match.blue_team_id) === winnerId;
+                const redWon = winnerId && Number(match.red_team_id) === winnerId;
 
-                  return (
-                    <div key={match.id} className="admin-match-card">
-                      <div className="admin-match-card-header">
-                        <span className="admin-match-card-title">
-                          Match #{match.match_no ?? match.id}
+                return (
+                  <article
+                    key={match.id}
+                    className={[
+                      "public-esports-card",
+                      status === "live" ? "is-live" : "",
+                      status === "queued" ? "is-queued" : "",
+                      status === "finished" ? "is-finished" : "",
+                    ]
+                      .filter(Boolean)
+                      .join(" ")}
+                  >
+                    <div className="public-esports-card-accent" aria-hidden="true" />
+                    <div className="public-esports-card-inner">
+                      <div className="public-esports-card-top">
+                        <div className="public-esports-card-identity">
+                          <span className="public-esports-round">{stage}</span>
+                          <span className="public-esports-match-no">
+                            Match #{match.match_no ?? match.id}
+                          </span>
+                        </div>
+                        <div className="public-esports-card-badges">
+                          <span className={statusBadgeClass(status)}>
+                            {status === "live" ? (
+                              <Radio size={11} aria-hidden="true" />
+                            ) : null}
+                            {statusLabel(status)}
+                          </span>
+                          {seriesFormat ? (
+                            <span className="public-esports-badge public-esports-badge-mode">
+                              {seriesFormat}
+                            </span>
+                          ) : null}
                           {match.queue_order != null ? (
-                            <span className="helper-text" style={{ marginLeft: 8, fontWeight: 500 }}>
+                            <span className="public-esports-badge public-esports-badge-queue">
                               Queue {match.queue_order}
                             </span>
                           ) : null}
-                        </span>
-                        <span className={`status-badge status-${status}`}>
-                          {statusLabel(status)}
-                        </span>
+                        </div>
                       </div>
 
-                      <div className="admin-match-card-teams">
-                        <TeamDisplay
+                      <div className="public-esports-teams">
+                        <TeamSide
                           name={match.blue_team_name || match.blue_team?.name}
-                          shortname={match.blue_team_shortname || match.blue_team?.shortname}
+                          shortname={
+                            match.blue_team_shortname || match.blue_team?.shortname
+                          }
                           id={match.blue_team_id}
                           logo={match.blue_team_logo || match.blue_team?.logo}
                           isRed={false}
-                          isWinner={winnerId && Number(match.blue_team_id) === winnerId}
+                          isWinner={blueWon}
                         />
 
-                        <div
-                          className="admin-match-score-center"
-                          style={{
-                            display: "flex",
-                            alignItems: "center",
-                            gap: "8px",
-                            justifyContent: "center",
-                          }}
-                        >
-                          <span>{match.blue_score ?? 0}</span>
-                          <span style={{ fontSize: "12px", opacity: 0.7 }}>VS</span>
-                          <span>{match.red_score ?? 0}</span>
+                        <div className="public-esports-scoreboard">
+                          <div className="public-esports-score-row">
+                            <span
+                              className={[
+                                "public-esports-score",
+                                blueWon ? "is-winner" : "",
+                              ]
+                                .filter(Boolean)
+                                .join(" ")}
+                            >
+                              {match.blue_score ?? 0}
+                            </span>
+                            <span className="public-esports-vs">VS</span>
+                            <span
+                              className={[
+                                "public-esports-score",
+                                redWon ? "is-winner" : "",
+                              ]
+                                .filter(Boolean)
+                                .join(" ")}
+                            >
+                              {match.red_score ?? 0}
+                            </span>
+                          </div>
                         </div>
 
-                        <TeamDisplay
+                        <TeamSide
                           name={match.red_team_name || match.red_team?.name}
-                          shortname={match.red_team_shortname || match.red_team?.shortname}
+                          shortname={
+                            match.red_team_shortname || match.red_team?.shortname
+                          }
                           id={match.red_team_id}
                           logo={match.red_team_logo || match.red_team?.logo}
                           isRed={true}
-                          isWinner={winnerId && Number(match.red_team_id) === winnerId}
+                          isWinner={redWon}
                         />
                       </div>
-
-                      <div className="admin-match-card-footer">
-                        <div className="admin-match-card-meta">
-                          {seriesFormat ? (
-                            <span className="admin-match-mode-pill">{seriesFormat}</span>
-                          ) : null}
-                        </div>
-                      </div>
                     </div>
-                  );
-                })}
-              </div>
+                  </article>
+                );
+              })}
             </div>
-          ))}
-        </div>
+          </section>
+        ))
       )}
     </div>
   );
