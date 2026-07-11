@@ -2008,17 +2008,31 @@
 .brs-updated-chip {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   padding: 10px 14px;
-  border-radius: 999px;
+  border-radius: 14px;
   border: 1px solid rgba(220, 38, 38, 0.28);
   background:
     linear-gradient(180deg, rgba(40, 14, 18, 0.9), rgba(16, 10, 14, 0.95));
   color: #fecaca;
   font-size: 12px;
   font-weight: 700;
-  white-space: nowrap;
   box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.02) inset;
+}
+
+.brs-updated-chip-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  line-height: 1.2;
+}
+
+.brs-updated-chip-label {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(254, 202, 202, 0.75);
 }
 
 .brs-controls {

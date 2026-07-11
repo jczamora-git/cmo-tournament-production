@@ -42,15 +42,17 @@ function ViewStandings() {
   const [data, setData] = useState(null);
   const [loadingList, setLoadingList] = useState(true);
   const [loadingStandings, setLoadingStandings] = useState(false);
-  const [error, setError] = useState("");
+  // Public page: track load failure without exposing technical API messages
+  const [loadFailed, setLoadFailed] = useState(false);
 
   useEffect(() => {
     getTournaments()
       .then((rows) => setTournaments(Array.isArray(rows) ? rows : []))
-      .catch((err) => setError(err.message || "Failed to load tournaments"))
+      .catch(() => setTournaments([]))
       .finally(() => setLoadingList(false));
   }, []);
 
+  // Default tournament/mode when nothing selected
   useEffect(() => {
     if (loadingList || tournamentId || tournaments.length === 0) return;
 
@@ -63,6 +65,7 @@ function ViewStandings() {
     if (brMode) setModeId(String(brMode.id));
   }, [loadingList, tournamentId, tournaments]);
 
+  // Load modes for selected tournament
   useEffect(() => {
     if (!tournamentId) {
       setModes([]);
@@ -80,21 +83,31 @@ function ViewStandings() {
       .catch(() => setModes([]));
   }, [tournamentId, tournaments]);
 
+  // Correct invalid mode IDs (e.g. mode from another tournament in the URL)
   useEffect(() => {
     if (!modes.length) return;
     if (modeId && modes.some((m) => String(m.id) === String(modeId))) return;
     const brMode = modes.find(isBrMode) || modes[0];
     if (brMode) setModeId(String(brMode.id));
+    else setModeId("");
   }, [modes, modeId]);
 
+  const modeIsValid = useMemo(() => {
+    if (!tournamentId || !modeId) return false;
+    // Until modes are known, avoid firing a request that may 404 with a bad URL pair
+    if (!modes.length) return false;
+    return modes.some((m) => String(m.id) === String(modeId));
+  }, [tournamentId, modeId, modes]);
+
   const loadStandings = useCallback(async () => {
-    if (!tournamentId || !modeId) {
+    if (!modeIsValid) {
       setData(null);
+      setLoadFailed(false);
       return;
     }
 
     setLoadingStandings(true);
-    setError("");
+    setLoadFailed(false);
     try {
       const result = await getBrGroupStandings({
         tournament_id: tournamentId,
@@ -108,13 +121,14 @@ function ViewStandings() {
         },
         { replace: true }
       );
-    } catch (err) {
+    } catch {
+      // Hide technical API errors from public visitors
       setData(null);
-      setError(err.message || "Failed to load standings");
+      setLoadFailed(true);
     } finally {
       setLoadingStandings(false);
     }
-  }, [tournamentId, modeId, setSearchParams]);
+  }, [modeIsValid, tournamentId, modeId, setSearchParams]);
 
   useEffect(() => {
     loadStandings();
@@ -149,9 +163,12 @@ function ViewStandings() {
         </div>
 
         {updatedLabel ? (
-          <div className="brs-updated-chip" title="Last data update from controller push">
+          <div className="brs-updated-chip" title="Synced from tournament controller">
             <Clock3 size={15} strokeWidth={2} aria-hidden />
-            <span>Updated {updatedLabel}</span>
+            <div className="brs-updated-chip-text">
+              <span className="brs-updated-chip-label">Data from Controller</span>
+              <span>Updated {updatedLabel}</span>
+            </div>
           </div>
         ) : null}
       </header>
@@ -164,6 +181,8 @@ function ViewStandings() {
             onChange={(e) => {
               setTournamentId(e.target.value);
               setModeId("");
+              setData(null);
+              setLoadFailed(false);
             }}
           >
             <option value="">Select tournament</option>
@@ -179,7 +198,10 @@ function ViewStandings() {
           <span>Mode</span>
           <select
             value={modeId}
-            onChange={(e) => setModeId(e.target.value)}
+            onChange={(e) => {
+              setModeId(e.target.value);
+              setLoadFailed(false);
+            }}
             disabled={!tournamentId || modes.length === 0}
           >
             <option value="">{modes.length ? "Select mode" : "No modes"}</option>
@@ -193,9 +215,7 @@ function ViewStandings() {
         </label>
       </div>
 
-      {error ? <div className="admin-error-message">{error}</div> : null}
-
-      {loadingStandings ? (
+      {loadingStandings || (tournamentId && modeId && !modes.length) ? (
         <LoadingState message="Loading group standings..." />
       ) : !tournamentId || !modeId ? (
         <EmptyState
@@ -203,11 +223,11 @@ function ViewStandings() {
           title="Select a tournament"
           description="Choose a tournament and BR mode to view group standings."
         />
-      ) : !hasRows ? (
+      ) : !hasRows || loadFailed ? (
         <EmptyState
           icon={<Trophy size={48} strokeWidth={1.5} color="currentColor" />}
-          title="No standings yet"
-          description="Standings appear here after the controller pushes BR group results."
+          title="No standings data available yet"
+          description="Standings will appear here after the controller pushes BR group results."
         />
       ) : (
         <BrStandingsTables groups={groups} detailed={false} variant="public" />

@@ -106,7 +106,7 @@ function BrStandingsTables({ groups = [], detailed = false, variant = "public" }
                     <th className="brs-col-rank">Rank</th>
                     <th className="brs-col-team">Team</th>
                     <th className="brs-col-num">Kills</th>
-                    <th className="brs-col-num">Placement</th>
+                    <th className="brs-col-num">+PL</th>
                     {detailed ? <th className="brs-col-num">Kill Pts</th> : null}
                     <th className="brs-col-total">Total</th>
                     {detailed ? <th className="brs-col-num">Rounds</th> : null}
