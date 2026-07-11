@@ -100,7 +100,7 @@ async function ensureSyncSchema(connection = db) {
         ON bracket_rounds (public_round_id) WHERE public_round_id IS NOT NULL
       `);
 
-      // Structural nodes only — team ids live on matches, not bracket_nodes
+      // Structural nodes only — team ids live on matches; status may be absent on live PG
       await connection.query(`
         CREATE TABLE IF NOT EXISTS bracket_nodes (
           id SERIAL PRIMARY KEY,
@@ -116,7 +116,6 @@ async function ensureSyncSchema(connection = db) {
           next_node_id INTEGER,
           node_key VARCHAR(64),
           label VARCHAR(255),
-          status VARCHAR(50) DEFAULT 'pending',
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
           updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
@@ -134,11 +133,24 @@ async function ensureSyncSchema(connection = db) {
         `ALTER TABLE bracket_nodes ADD COLUMN IF NOT EXISTS public_match_id INTEGER`
       );
       await connection.query(
+        `ALTER TABLE bracket_nodes ADD COLUMN IF NOT EXISTS match_id INTEGER`
+      );
+      await connection.query(
+        `ALTER TABLE bracket_nodes ADD COLUMN IF NOT EXISTS position INTEGER DEFAULT 0`
+      );
+      await connection.query(
+        `ALTER TABLE bracket_nodes ADD COLUMN IF NOT EXISTS next_public_node_id INTEGER`
+      );
+      await connection.query(
+        `ALTER TABLE bracket_nodes ADD COLUMN IF NOT EXISTS next_node_id INTEGER`
+      );
+      await connection.query(
         `ALTER TABLE bracket_nodes ADD COLUMN IF NOT EXISTS node_key VARCHAR(64)`
       );
       await connection.query(
         `ALTER TABLE bracket_nodes ADD COLUMN IF NOT EXISTS label VARCHAR(255)`
       );
+      // status is optional — do not require it; add only if you want it later
       await connection.query(`
         CREATE UNIQUE INDEX IF NOT EXISTS uq_bracket_nodes_public_node_id
         ON bracket_nodes (public_node_id) WHERE public_node_id IS NOT NULL
