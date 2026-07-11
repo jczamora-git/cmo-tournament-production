@@ -330,7 +330,12 @@ function ViewBracketPreview() {
           </div>
 
           <section className="bracket-canvas public-bracket-canvas">
-            <BracketTreePreview preview={preview} variant="full" />
+            {/* key forces connector re-measure when data refreshes */}
+            <BracketTreePreview
+              key={`bracket-tree-${lastUpdated?.getTime?.() || "0"}-${preview.rounds?.length || 0}`}
+              preview={preview}
+              variant="full"
+            />
           </section>
         </div>
       ) : null}
