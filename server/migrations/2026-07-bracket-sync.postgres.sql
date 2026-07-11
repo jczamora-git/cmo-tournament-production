@@ -71,3 +71,27 @@ CREATE TABLE IF NOT EXISTS bracket_nodes (
 CREATE INDEX IF NOT EXISTS idx_bracket_rounds_bracket_id ON bracket_rounds (bracket_id);
 CREATE INDEX IF NOT EXISTS idx_bracket_nodes_bracket_id ON bracket_nodes (bracket_id);
 CREATE INDEX IF NOT EXISTS idx_bracket_nodes_public_match_id ON bracket_nodes (public_match_id);
+
+-- Seeds (Controller bracket_seeds → public generator tree / Top 16 layout)
+CREATE TABLE IF NOT EXISTS bracket_seeds (
+  id SERIAL PRIMARY KEY,
+  bracket_id INTEGER NOT NULL REFERENCES brackets(id) ON DELETE CASCADE,
+  public_bracket_id INTEGER,
+  seed_no INTEGER NOT NULL,
+  team_id INTEGER,
+  status VARCHAR(50) DEFAULT 'active',
+  team_name VARCHAR(255),
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+ALTER TABLE bracket_seeds ADD COLUMN IF NOT EXISTS public_bracket_id INTEGER;
+ALTER TABLE bracket_seeds ADD COLUMN IF NOT EXISTS team_name VARCHAR(255);
+ALTER TABLE bracket_seeds ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'active';
+ALTER TABLE bracket_seeds ADD COLUMN IF NOT EXISTS team_id INTEGER;
+ALTER TABLE bracket_seeds ADD COLUMN IF NOT EXISTS seed_no INTEGER;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_bracket_seeds_bracket_seed
+  ON bracket_seeds (bracket_id, seed_no);
+
+CREATE INDEX IF NOT EXISTS idx_bracket_seeds_bracket_id ON bracket_seeds (bracket_id);

@@ -2,12 +2,92 @@ const db = require("../db");
 
 let ensured = false;
 let ensuring = null;
+let seedsEnsured = false;
+
+/**
+ * Always ensure bracket_seeds exists (Controller push includes seeds for preview tree).
+ * Separate from main cache so a mid-deploy table add still runs on next request.
+ */
+async function ensureBracketSeedsTable(connection = db) {
+  if (db.client === "postgres") {
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS bracket_seeds (
+        id SERIAL PRIMARY KEY,
+        bracket_id INTEGER NOT NULL REFERENCES brackets(id) ON DELETE CASCADE,
+        public_bracket_id INTEGER,
+        seed_no INTEGER NOT NULL,
+        team_id INTEGER,
+        status VARCHAR(50) DEFAULT 'active',
+        team_name VARCHAR(255),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    await connection.query(
+      `ALTER TABLE bracket_seeds ADD COLUMN IF NOT EXISTS public_bracket_id INTEGER`
+    );
+    await connection.query(
+      `ALTER TABLE bracket_seeds ADD COLUMN IF NOT EXISTS team_name VARCHAR(255)`
+    );
+    await connection.query(
+      `ALTER TABLE bracket_seeds ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'active'`
+    );
+    await connection.query(
+      `ALTER TABLE bracket_seeds ADD COLUMN IF NOT EXISTS team_id INTEGER`
+    );
+    await connection.query(
+      `ALTER TABLE bracket_seeds ADD COLUMN IF NOT EXISTS seed_no INTEGER`
+    );
+    await connection.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS uq_bracket_seeds_bracket_seed
+      ON bracket_seeds (bracket_id, seed_no)
+    `);
+  } else {
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS bracket_seeds (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        bracket_id INT NOT NULL,
+        public_bracket_id INT NULL,
+        seed_no INT NOT NULL,
+        team_id INT NULL,
+        status VARCHAR(50) DEFAULT 'active',
+        team_name VARCHAR(255) NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uq_bracket_seeds_bracket_seed (bracket_id, seed_no),
+        KEY idx_bracket_seeds_bracket_id (bracket_id)
+      )
+    `);
+    // Best-effort adds when table existed with fewer columns
+    for (const sql of [
+      `ALTER TABLE bracket_seeds ADD COLUMN public_bracket_id INT NULL`,
+      `ALTER TABLE bracket_seeds ADD COLUMN team_name VARCHAR(255) NULL`,
+      `ALTER TABLE bracket_seeds ADD COLUMN status VARCHAR(50) DEFAULT 'active'`,
+    ]) {
+      try {
+        await connection.query(sql);
+      } catch (_) {
+        /* exists */
+      }
+    }
+  }
+  seedsEnsured = true;
+}
 
 /**
  * Ensure columns/tables needed for Controller → production sync exist.
  * Safe to call multiple times (cached after first success).
  */
 async function ensureSyncSchema(connection = db) {
+  // Seeds table is cheap to re-check; always keep it available for bracket push
+  try {
+    if (!seedsEnsured) {
+      await ensureBracketSeedsTable(connection);
+    }
+  } catch (seedSchemaErr) {
+    console.warn("[ensureSyncSchema] bracket_seeds ensure failed:", seedSchemaErr.message);
+  }
+
   if (ensured) return;
   if (ensuring) return ensuring;
 
@@ -156,33 +236,7 @@ async function ensureSyncSchema(connection = db) {
         ON bracket_nodes (public_node_id) WHERE public_node_id IS NOT NULL
       `);
 
-      // Seeds drive generator tree + match numbering on public bracket-preview
-      await connection.query(`
-        CREATE TABLE IF NOT EXISTS bracket_seeds (
-          id SERIAL PRIMARY KEY,
-          bracket_id INTEGER NOT NULL REFERENCES brackets(id) ON DELETE CASCADE,
-          public_bracket_id INTEGER,
-          seed_no INTEGER NOT NULL,
-          team_id INTEGER,
-          status VARCHAR(50) DEFAULT 'active',
-          team_name VARCHAR(255),
-          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-      `);
-      await connection.query(
-        `ALTER TABLE bracket_seeds ADD COLUMN IF NOT EXISTS public_bracket_id INTEGER`
-      );
-      await connection.query(
-        `ALTER TABLE bracket_seeds ADD COLUMN IF NOT EXISTS team_name VARCHAR(255)`
-      );
-      await connection.query(
-        `ALTER TABLE bracket_seeds ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'active'`
-      );
-      await connection.query(`
-        CREATE UNIQUE INDEX IF NOT EXISTS uq_bracket_seeds_bracket_seed
-        ON bracket_seeds (bracket_id, seed_no)
-      `);
+      await ensureBracketSeedsTable(connection);
     } else {
       // MySQL: best-effort column adds
       try {
@@ -258,21 +312,7 @@ async function ensureSyncSchema(connection = db) {
           KEY idx_bracket_nodes_public_match_id (public_match_id)
         )
       `);
-      await connection.query(`
-        CREATE TABLE IF NOT EXISTS bracket_seeds (
-          id INT AUTO_INCREMENT PRIMARY KEY,
-          bracket_id INT NOT NULL,
-          public_bracket_id INT NULL,
-          seed_no INT NOT NULL,
-          team_id INT NULL,
-          status VARCHAR(50) DEFAULT 'active',
-          team_name VARCHAR(255) NULL,
-          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-          UNIQUE KEY uq_bracket_seeds_bracket_seed (bracket_id, seed_no),
-          KEY idx_bracket_seeds_bracket_id (bracket_id)
-        )
-      `);
+      await ensureBracketSeedsTable(connection);
     }
 
     ensured = true;
@@ -285,4 +325,4 @@ async function ensureSyncSchema(connection = db) {
   }
 }
 
-module.exports = { ensureSyncSchema };
+module.exports = { ensureSyncSchema, ensureBracketSeedsTable };

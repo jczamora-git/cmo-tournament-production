@@ -59,7 +59,26 @@ function emptySyncStats(received = 0) {
 }
 
 function getInsertId(result, meta) {
-  return (meta && meta.insertId) || (result && result[0] && result[0].id) || null;
+  return (
+    (meta && meta.insertId) ||
+    (result && result.insertId) ||
+    (result && result[0] && result[0].id) ||
+    null
+  );
+}
+
+/** Normalize seed status for Controller enum / production VARCHAR. */
+function normalizeSeedStatus(status) {
+  const raw = status != null ? String(status).trim().toLowerCase() : "active";
+  const allowed = new Set([
+    "active",
+    "eliminated",
+    "qualified",
+    "champion",
+    "withdrawn",
+    "disqualified",
+  ]);
+  return allowed.has(raw) ? raw : "active";
 }
 
 async function findMatchIdByPublicId(connection, publicMatchId) {
@@ -3094,27 +3113,51 @@ router.post("/brackets", async (req, res) => {
       }
     }
 
-    // —— bracket_seeds (needed for public generator tree / match numbering) ——
+    // —— bracket_seeds (Controller table → production; drives public bracket-preview tree) ——
+    try {
+      const { ensureBracketSeedsTable } = require("../services/ensureSyncSchema");
+      await ensureBracketSeedsTable(connection);
+    } catch (seedSchemaErr) {
+      warnings.push({
+        code: "BRACKET_SEEDS_SCHEMA",
+        message: `Could not ensure bracket_seeds table: ${seedSchemaErr.message}`,
+      });
+    }
+
+    /** seed_nos successfully written per production bracket_id (for orphan cleanup) */
+    const seedNosByBracket = new Map();
+
+    console.log(`[sync-api] processing bracket_seeds count=${seeds.length}`);
+
     for (const item of seeds) {
       try {
         if (!item || typeof item !== "object") {
           throw new Error("Invalid bracket_seed item (expected object)");
         }
 
-        const { bracketId, publicBracketId } = await resolveBracketIdForChild(item, "bracket_seed");
+        const { bracketId, publicBracketId } = await resolveBracketIdForChild(
+          item,
+          "bracket_seed"
+        );
         const seedNo = parsePositiveInt(item.seed_no ?? item.seedNo ?? item.seed);
         if (!seedNo) {
           throw new Error("bracket_seed requires seed_no");
         }
 
-        const teamId = parsePositiveInt(item.team_id ?? item.public_team_id ?? item.teamId) || null;
-        const status = item.status != null ? String(item.status) : "active";
+        // Controller maps local team → production public_team_id into team_id
+        const teamId =
+          parsePositiveInt(
+            item.team_id ?? item.public_team_id ?? item.teamId ?? item.publicTeamId
+          ) || null;
+        const status = normalizeSeedStatus(item.status);
         const teamName =
           item.team_name != null
             ? String(item.team_name)
             : item.teamName != null
               ? String(item.teamName)
-              : null;
+              : item.name != null
+                ? String(item.name)
+                : null;
 
         let existingId = null;
         try {
@@ -3124,10 +3167,9 @@ router.post("/brackets", async (req, res) => {
           );
           existingId = found[0]?.id || null;
         } catch (lookupErr) {
-          // Table may not exist yet — ensure schema then retry once
           if (/doesn't exist|does not exist|relation/i.test(lookupErr.message || "")) {
-            const { ensureSyncSchema } = require("../services/ensureSyncSchema");
-            await ensureSyncSchema(connection);
+            const { ensureBracketSeedsTable } = require("../services/ensureSyncSchema");
+            await ensureBracketSeedsTable(connection);
             const [found] = await connection.query(
               `SELECT id FROM bracket_seeds WHERE bracket_id = ? AND seed_no = ? LIMIT 1`,
               [bracketId, seedNo]
@@ -3145,14 +3187,26 @@ router.post("/brackets", async (req, res) => {
           const updates = [
             {
               sql: `UPDATE bracket_seeds SET
-                      team_id = ?, status = ?, team_name = COALESCE(?, team_name),
+                      team_id = ?, status = ?, team_name = ?,
                       public_bracket_id = COALESCE(?, public_bracket_id),
                       updated_at = NOW()
                     WHERE id = ?`,
               params: [teamId, status, teamName, publicBracketId, existingId],
             },
             {
+              sql: `UPDATE bracket_seeds SET team_id = ?, status = ?, team_name = ? WHERE id = ?`,
+              params: [teamId, status, teamName, existingId],
+            },
+            {
               sql: `UPDATE bracket_seeds SET team_id = ?, status = ? WHERE id = ?`,
+              params: [teamId, status, existingId],
+            },
+            {
+              // team_id NOT NULL schemas: keep previous team if payload has null
+              sql: `UPDATE bracket_seeds SET
+                      team_id = COALESCE(?, team_id),
+                      status = COALESCE(?, status)
+                    WHERE id = ?`,
               params: [teamId, status, existingId],
             },
           ];
@@ -3178,6 +3232,16 @@ router.post("/brackets", async (req, res) => {
               params: [bracketId, publicBracketId, seedNo, teamId, status, teamName],
             },
             {
+              sql: `INSERT INTO bracket_seeds (bracket_id, seed_no, team_id, status, team_name)
+                    VALUES (?, ?, ?, ?, ?)`,
+              params: [bracketId, seedNo, teamId, status, teamName],
+            },
+            {
+              sql: `INSERT INTO bracket_seeds (bracket_id, team_id, seed_no, status)
+                    VALUES (?, ?, ?, ?)`,
+              params: [bracketId, teamId, seedNo, status],
+            },
+            {
               sql: `INSERT INTO bracket_seeds (bracket_id, seed_no, team_id, status)
                     VALUES (?, ?, ?, ?)`,
               params: [bracketId, seedNo, teamId, status],
@@ -3192,15 +3256,15 @@ router.post("/brackets", async (req, res) => {
           let lastErr = null;
           for (const ins of inserts) {
             try {
-              const [result] = await connection.query(ins.sql, ins.params);
-              productionSeedId =
-                result?.insertId ||
-                result?.rows?.[0]?.id ||
-                (await connection.query(
+              const [result, meta] = await connection.query(ins.sql, ins.params);
+              productionSeedId = getInsertId(result, meta);
+              if (!productionSeedId) {
+                const [lookup] = await connection.query(
                   `SELECT id FROM bracket_seeds WHERE bracket_id = ? AND seed_no = ? LIMIT 1`,
                   [bracketId, seedNo]
-                ).then(([r]) => r[0]?.id)) ||
-                null;
+                );
+                productionSeedId = lookup[0]?.id || null;
+              }
               inserted = true;
               wasCreated = true;
               break;
@@ -3208,15 +3272,21 @@ router.post("/brackets", async (req, res) => {
               lastErr = e;
             }
           }
-          if (!inserted) throw lastErr || new Error("Failed to insert bracket_seed");
+          if (!inserted) {
+            throw lastErr || new Error("Failed to insert bracket_seed");
+          }
           stats.created += 1;
         }
 
+        if (!seedNosByBracket.has(bracketId)) seedNosByBracket.set(bracketId, new Set());
+        seedNosByBracket.get(bracketId).add(seedNo);
+
         mappings.seeds.push({
           public_bracket_id: publicBracketId,
+          public_seed_id: productionSeedId,
+          id: productionSeedId,
           seed_no: seedNo,
           team_id: teamId,
-          id: productionSeedId,
           created: wasCreated,
         });
       } catch (err) {
@@ -3229,7 +3299,41 @@ router.post("/brackets", async (req, res) => {
           error: err.message,
           message: err.message,
         });
+        console.error(
+          `[sync-api] bracket_seed failed seed_no=${item?.seed_no ?? "?"} :`,
+          err.message
+        );
       }
+    }
+
+    // Remove stale seeds not present in this full payload (per bracket)
+    if (seeds.length > 0 && seedNosByBracket.size > 0) {
+      for (const [bracketId, seedNoSet] of seedNosByBracket.entries()) {
+        try {
+          const keep = [...seedNoSet];
+          if (!keep.length) continue;
+          const placeholders = keep.map(() => "?").join(", ");
+          await connection.query(
+            `DELETE FROM bracket_seeds
+             WHERE bracket_id = ?
+               AND seed_no NOT IN (${placeholders})`,
+            [bracketId, ...keep]
+          );
+        } catch (cleanupErr) {
+          warnings.push({
+            code: "BRACKET_SEEDS_CLEANUP",
+            message: `Could not prune stale seeds for bracket ${bracketId}: ${cleanupErr.message}`,
+          });
+        }
+      }
+    }
+
+    if (seeds.length) {
+      console.log(
+        `[sync-api] bracket_seeds done mapped=${mappings.seeds.length} failed=${
+          stats.errors.filter((e) => e.entity === "bracket_seed").length
+        }`
+      );
     }
 
     // Resolve next_node_id from next_public_node_id / controller keys (best-effort, non-fatal)
@@ -3323,7 +3427,8 @@ router.post("/brackets", async (req, res) => {
     };
 
     console.log(
-      `[sync-api] brackets sync received=${stats.received} created=${stats.created} updated=${stats.updated} failed=${stats.failed} public_bracket_id=${response.public_bracket_id}`
+      `[sync-api] brackets sync received=${stats.received} created=${stats.created} updated=${stats.updated} failed=${stats.failed} ` +
+        `seeds_in=${seeds.length} seeds_mapped=${mappings.seeds.length} public_bracket_id=${response.public_bracket_id}`
     );
 
     // Partial success → 200 (parent may succeed while some children fail)

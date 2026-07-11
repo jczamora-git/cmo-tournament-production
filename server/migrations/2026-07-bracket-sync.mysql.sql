@@ -83,3 +83,19 @@ CREATE TABLE IF NOT EXISTS bracket_nodes (
   CONSTRAINT fk_bracket_nodes_bracket FOREIGN KEY (bracket_id) REFERENCES brackets(id) ON DELETE CASCADE,
   CONSTRAINT fk_bracket_nodes_round FOREIGN KEY (round_id) REFERENCES bracket_rounds(id) ON DELETE SET NULL
 );
+
+-- Seeds (Controller bracket_seeds → public generator tree / Top 16 layout)
+CREATE TABLE IF NOT EXISTS bracket_seeds (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  bracket_id INT NOT NULL,
+  public_bracket_id INT NULL,
+  seed_no INT NOT NULL,
+  team_id INT NULL,
+  status VARCHAR(50) DEFAULT 'active',
+  team_name VARCHAR(255) NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_bracket_seeds_bracket_seed (bracket_id, seed_no),
+  KEY idx_bracket_seeds_bracket_id (bracket_id),
+  CONSTRAINT fk_bracket_seeds_bracket FOREIGN KEY (bracket_id) REFERENCES brackets(id) ON DELETE CASCADE
+);
