@@ -20,9 +20,12 @@ CREATE TABLE IF NOT EXISTS brackets (
   name VARCHAR(255) DEFAULT 'Bracket',
   bracket_type VARCHAR(50) DEFAULT 'single_elimination',
   status VARCHAR(50) DEFAULT 'active',
+  settings_json TEXT,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+ALTER TABLE brackets ADD COLUMN IF NOT EXISTS settings_json TEXT;
 
 CREATE TABLE IF NOT EXISTS bracket_rounds (
   id SERIAL PRIMARY KEY,
