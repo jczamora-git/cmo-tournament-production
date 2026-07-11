@@ -100,6 +100,7 @@ async function ensureSyncSchema(connection = db) {
         ON bracket_rounds (public_round_id) WHERE public_round_id IS NOT NULL
       `);
 
+      // Structural nodes only — team ids live on matches, not bracket_nodes
       await connection.query(`
         CREATE TABLE IF NOT EXISTS bracket_nodes (
           id SERIAL PRIMARY KEY,
@@ -111,11 +112,10 @@ async function ensureSyncSchema(connection = db) {
           public_match_id INTEGER,
           match_id INTEGER,
           position INTEGER DEFAULT 0,
-          blue_team_id INTEGER,
-          red_team_id INTEGER,
-          winner_team_id INTEGER,
           next_public_node_id INTEGER,
           next_node_id INTEGER,
+          node_key VARCHAR(64),
+          label VARCHAR(255),
           status VARCHAR(50) DEFAULT 'pending',
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
           updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -206,11 +206,10 @@ async function ensureSyncSchema(connection = db) {
           public_match_id INT NULL,
           match_id INT NULL,
           position INT DEFAULT 0,
-          blue_team_id INT NULL,
-          red_team_id INT NULL,
-          winner_team_id INT NULL,
           next_public_node_id INT NULL,
           next_node_id INT NULL,
+          node_key VARCHAR(64) NULL,
+          label VARCHAR(255) NULL,
           status VARCHAR(50) DEFAULT 'pending',
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
           updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,

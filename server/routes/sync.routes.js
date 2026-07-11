@@ -2587,25 +2587,11 @@ router.post("/brackets", async (req, res) => {
 
         const position =
           parseNonNegInt(item.position ?? item.slot_index ?? item.slotIndex ?? item.order, 0) ?? 0;
-        const blueTeamId = parsePositiveInt(
-          item.blue_team_id ||
-            item.blueTeamId ||
-            item.slot_a_team_id ||
-            item.slotATeamId ||
-            item.team_a_id ||
-            item.teamAId
-        );
-        const redTeamId = parsePositiveInt(
-          item.red_team_id ||
-            item.redTeamId ||
-            item.slot_b_team_id ||
-            item.slotBTeamId ||
-            item.team_b_id ||
-            item.teamBId
-        );
-        const winnerTeamId = parsePositiveInt(item.winner_team_id || item.winnerTeamId);
+        // Team IDs live on matches — do NOT write blue_team_id/red_team_id on bracket_nodes
+        // (live PG schema may not have those columns).
         const status = normalizeStatus(item.status) || "pending";
         const nodeKey = item.node_key || item.nodeKey || null;
+        const label = item.label != null ? String(item.label) : null;
 
         let existingId = null;
         if (publicNodeId) {
@@ -2640,30 +2626,59 @@ router.post("/brackets", async (req, res) => {
 
         if (existingId) {
           productionNodeId = existingId;
-          await connection.query(
-            `UPDATE bracket_nodes SET
-              bracket_id = ?, round_id = ?, public_bracket_id = ?, public_round_id = ?,
-              public_node_id = COALESCE(public_node_id, ?), public_match_id = ?, match_id = ?, position = ?,
-              blue_team_id = ?, red_team_id = ?, winner_team_id = ?,
-              next_public_node_id = ?, status = ?, updated_at = NOW()
-             WHERE id = ?`,
-            [
-              bracketId,
-              roundId,
-              publicBracketId,
-              publicRoundId,
-              publicNodeId || existingId,
-              publicMatchId,
-              matchId,
-              position,
-              blueTeamId,
-              redTeamId,
-              winnerTeamId,
-              nextPublicNodeId,
-              status,
-              existingId,
-            ]
-          );
+          // Structural fields only — no team columns (teams are on matches)
+          const updateAttempts = [
+            {
+              sql: `UPDATE bracket_nodes SET
+                      bracket_id = ?, round_id = ?, public_bracket_id = ?, public_round_id = ?,
+                      public_node_id = COALESCE(public_node_id, ?), public_match_id = ?, match_id = ?,
+                      position = ?, next_public_node_id = ?, status = ?, updated_at = NOW()
+                    WHERE id = ?`,
+              params: [
+                bracketId,
+                roundId,
+                publicBracketId,
+                publicRoundId,
+                publicNodeId || existingId,
+                publicMatchId,
+                matchId,
+                position,
+                nextPublicNodeId,
+                status,
+                existingId,
+              ],
+            },
+            {
+              sql: `UPDATE bracket_nodes SET
+                      bracket_id = ?, round_id = ?, public_bracket_id = ?, public_round_id = ?,
+                      public_match_id = ?, match_id = ?, position = ?, status = ?, updated_at = NOW()
+                    WHERE id = ?`,
+              params: [
+                bracketId,
+                roundId,
+                publicBracketId,
+                publicRoundId,
+                publicMatchId,
+                matchId,
+                position,
+                status,
+                existingId,
+              ],
+            },
+          ];
+          let updatedOk = false;
+          let lastUpdErr = null;
+          for (const attempt of updateAttempts) {
+            try {
+              await connection.query(attempt.sql, attempt.params);
+              updatedOk = true;
+              break;
+            } catch (e) {
+              lastUpdErr = e;
+            }
+          }
+          if (!updatedOk) throw lastUpdErr;
+
           if (!publicNodeId) {
             const [nrow] = await connection.query(
               `SELECT public_node_id FROM bracket_nodes WHERE id = ?`,
@@ -2681,29 +2696,68 @@ router.post("/brackets", async (req, res) => {
           }
           stats.updated += 1;
         } else {
-          const [result, meta] = await connection.query(
-            `INSERT INTO bracket_nodes (
-              public_node_id, bracket_id, round_id, public_bracket_id, public_round_id,
-              public_match_id, match_id, position, blue_team_id, red_team_id,
-              winner_team_id, next_public_node_id, status
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [
-              publicNodeId,
-              bracketId,
-              roundId,
-              publicBracketId,
-              publicRoundId,
-              publicMatchId,
-              matchId,
-              position,
-              blueTeamId,
-              redTeamId,
-              winnerTeamId,
-              nextPublicNodeId,
-              status,
-            ]
-          );
+          // Structural insert only — never reference blue_team_id / red_team_id / winner_team_id
+          const insertAttempts = [
+            {
+              sql: `INSERT INTO bracket_nodes (
+                      public_node_id, bracket_id, round_id, public_bracket_id, public_round_id,
+                      public_match_id, match_id, position, next_public_node_id, status
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              params: [
+                publicNodeId,
+                bracketId,
+                roundId,
+                publicBracketId,
+                publicRoundId,
+                publicMatchId,
+                matchId,
+                position,
+                nextPublicNodeId,
+                status,
+              ],
+            },
+            {
+              sql: `INSERT INTO bracket_nodes (
+                      public_node_id, bracket_id, round_id, public_bracket_id, public_round_id,
+                      public_match_id, match_id, position, status
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              params: [
+                publicNodeId,
+                bracketId,
+                roundId,
+                publicBracketId,
+                publicRoundId,
+                publicMatchId,
+                matchId,
+                position,
+                status,
+              ],
+            },
+            {
+              sql: `INSERT INTO bracket_nodes (
+                      bracket_id, round_id, public_bracket_id, match_id, position, status
+                    ) VALUES (?, ?, ?, ?, ?, ?)`,
+              params: [bracketId, roundId, publicBracketId, matchId, position, status],
+            },
+          ];
+          let result;
+          let meta;
+          let lastInsErr = null;
+          for (const attempt of insertAttempts) {
+            try {
+              [result, meta] = await connection.query(attempt.sql, attempt.params);
+              lastInsErr = null;
+              break;
+            } catch (e) {
+              lastInsErr = e;
+            }
+          }
+          if (lastInsErr) throw lastInsErr;
+
           productionNodeId = getInsertId(result, meta);
+          if (!productionNodeId) {
+            throw new Error("bracket_node insert did not return id");
+          }
           if (!publicNodeId && productionNodeId) {
             await connection.query(`UPDATE bracket_nodes SET public_node_id = ? WHERE id = ?`, [
               productionNodeId,
@@ -2715,14 +2769,26 @@ router.post("/brackets", async (req, res) => {
           stats.created += 1;
         }
 
-        if (nodeKey) {
+        if (nodeKey || label) {
           try {
             await connection.query(
-              `UPDATE bracket_nodes SET node_key = COALESCE(?, node_key) WHERE id = ?`,
-              [nodeKey, productionNodeId]
+              `UPDATE bracket_nodes SET
+                 node_key = COALESCE(?, node_key),
+                 label = COALESCE(?, label)
+               WHERE id = ?`,
+              [nodeKey, label, productionNodeId]
             );
           } catch (_) {
-            /* optional */
+            try {
+              if (nodeKey) {
+                await connection.query(
+                  `UPDATE bracket_nodes SET node_key = COALESCE(?, node_key) WHERE id = ?`,
+                  [nodeKey, productionNodeId]
+                );
+              }
+            } catch (__) {
+              /* optional columns */
+            }
           }
         }
 
