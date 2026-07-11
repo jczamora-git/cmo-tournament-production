@@ -503,6 +503,10 @@ router.post("/matches", async (req, res) => {
         matchFields.public_match_id,
       ]);
       matchId = getInsertId(result, meta);
+      // Controller stores response.id as public_match_id — also store on row for reverse lookup
+      if (matchId && !matchFields.public_match_id) {
+        await connection.query(`UPDATE matches SET public_match_id = ? WHERE id = ?`, [matchId, matchId]);
+      }
       stats.created = 1;
     }
 
@@ -768,56 +772,42 @@ router.post("/games", async (req, res) => {
   try {
     await ensureSyncSchema(connection);
 
-    if (!localMatchId && publicMatchId) {
-      localMatchId = await findMatchIdByPublicId(connection, publicMatchId);
-      if (!localMatchId) {
-        connection.release();
-        return res.status(404).json({
-          success: false,
-          code: "MATCH_NOT_SYNCED",
-          message: `No production match found for public_match_id ${publicMatchId}. Sync matches first.`,
-          received: 1,
-          created: 0,
-          updated: 0,
-          failed: 1,
-          errors: [{ public_match_id: publicMatchId, message: "Match not found by public_match_id" }],
-        });
+    // Controller sends match_id = production match id (same value stored as public_match_id on controller)
+    let match = null;
+    if (localMatchId) {
+      match = await findMatchForSync(connection, localMatchId);
+    }
+    if (!match && publicMatchId) {
+      match = await findMatchForSync(connection, publicMatchId);
+    }
+    if (!match && publicMatchId) {
+      const byPublicOnly = await findMatchIdByPublicId(connection, publicMatchId);
+      if (byPublicOnly) {
+        match = await findMatchForSync(connection, byPublicOnly);
       }
     }
 
-    const [matchRows] = await connection.query(
-      `SELECT id, blue_team_id, red_team_id, public_match_id FROM matches WHERE id = ?`,
-      [localMatchId]
-    );
-    if (matchRows.length === 0) {
+    if (!match) {
       connection.release();
       return res.status(404).json({
         success: false,
-        code: "NOT_FOUND",
-        message: "Match not found",
+        code: "MATCH_NOT_SYNCED",
+        message: `No production match found for match_id=${localMatchId || "n/a"} public_match_id=${publicMatchId || "n/a"}. Push matches first (or re-push after wiping matches).`,
         received: 1,
         created: 0,
         updated: 0,
         failed: 1,
-        errors: [{ match_id: localMatchId, message: "Match not found" }],
+        errors: [
+          {
+            match_id: localMatchId,
+            public_match_id: publicMatchId,
+            message: "Match not found by id or public_match_id",
+          },
+        ],
       });
     }
-    const match = matchRows[0];
 
-    // Optional: if caller also sent public_match_id, ensure it matches the row
-    if (publicMatchId && match.public_match_id && Number(match.public_match_id) !== publicMatchId) {
-      connection.release();
-      return res.status(400).json({
-        success: false,
-        code: "CONTEXT_MISMATCH",
-        message: "match_id does not match the given public_match_id",
-        received: 1,
-        created: 0,
-        updated: 0,
-        failed: 1,
-        errors: [{ message: "match_id does not match the given public_match_id" }],
-      });
-    }
+    localMatchId = match.id;
 
     const wId = parsePositiveInt(winner_team_id);
     if (wId) {
@@ -947,6 +937,8 @@ router.post("/games", async (req, res) => {
 });
 
 // 12. PUT /api/sync/games/:id
+// Controller uses :id = previously stored production game id (public_game_id on controller).
+// After games/matches wipe, recreate instead of 404 (Controller treats 404 as "endpoint not found").
 router.put("/games/:id", async (req, res) => {
   const gameId = parsePositiveInt(req.params.id);
   if (!gameId) {
@@ -963,86 +955,160 @@ router.put("/games/:id", async (req, res) => {
   }
 
   const body = req.body || {};
-  const updates = [];
-  const params = [];
+  const normalizedStatus = body.status !== undefined ? normalizeStatus(body.status) : null;
 
-  if (body.status !== undefined) {
-    const normalizedStatus = normalizeStatus(body.status);
-    if (!normalizedStatus || !GAME_STATUSES.includes(normalizedStatus)) {
-      return res.status(400).json({
-        success: false,
-        code: "VALIDATION_ERROR",
-        message: "Invalid status",
-        received: 1,
-        created: 0,
-        updated: 0,
-        failed: 1,
-        errors: [{ message: `Invalid status: ${body.status}. Allowed: ${GAME_STATUSES.join(", ")}` }],
-      });
-    }
-    updates.push("status = ?");
-    params.push(normalizedStatus);
-  }
-
-  if (body.game_no !== undefined) {
-    updates.push("game_no = ?");
-    params.push(parsePositiveInt(body.game_no) || null);
-  }
-  if (body.winner_team_id !== undefined) {
-    updates.push("winner_team_id = ?");
-    params.push(parsePositiveInt(body.winner_team_id) || null);
-  }
-  if (body.finished_at !== undefined) {
-    updates.push("finished_at = ?");
-    params.push(body.finished_at);
-  }
-  if (body.public_game_id !== undefined || body.game_public_id !== undefined) {
-    updates.push("public_game_id = ?");
-    params.push(parsePositiveInt(body.public_game_id || body.game_public_id) || null);
-  }
-
-  if (updates.length === 0) {
-    return res.json({
-      success: true,
+  if (body.status !== undefined && (!normalizedStatus || !GAME_STATUSES.includes(normalizedStatus))) {
+    return res.status(400).json({
+      success: false,
+      code: "VALIDATION_ERROR",
+      message: "Invalid status",
       received: 1,
       created: 0,
       updated: 0,
-      failed: 0,
-      errors: [],
-      id: gameId,
-      data: { id: gameId },
+      failed: 1,
+      errors: [{ message: `Invalid status: ${body.status}. Allowed: ${GAME_STATUSES.join(", ")}` }],
     });
   }
 
-  updates.push("updated_at = NOW()");
-  params.push(gameId);
-
   try {
     await ensureSyncSchema();
-    const [, meta] = await db.query(`UPDATE games SET ${updates.join(", ")} WHERE id = ?`, params);
-    if (meta.affectedRows === 0) {
+
+    // Prefer lookup by primary id, then by public_game_id
+    let [existing] = await db.query(`SELECT id, match_id FROM games WHERE id = ? LIMIT 1`, [gameId]);
+    if (!existing[0]) {
+      const [byPublic] = await db.query(
+        `SELECT id, match_id FROM games WHERE public_game_id = ? LIMIT 1`,
+        [gameId]
+      );
+      existing = byPublic;
+    }
+
+    if (existing[0]) {
+      const targetId = existing[0].id;
+      const updates = [];
+      const params = [];
+
+      if (normalizedStatus) {
+        updates.push("status = ?");
+        params.push(normalizedStatus);
+      }
+      if (body.game_no !== undefined) {
+        updates.push("game_no = ?");
+        params.push(parsePositiveInt(body.game_no) || null);
+      }
+      if (body.winner_team_id !== undefined) {
+        updates.push("winner_team_id = ?");
+        params.push(parsePositiveInt(body.winner_team_id) || null);
+      }
+      if (body.finished_at !== undefined) {
+        updates.push("finished_at = ?");
+        params.push(body.finished_at);
+      }
+      // Keep public_game_id pointing at controller's known production id
+      updates.push("public_game_id = COALESCE(public_game_id, ?)");
+      params.push(gameId);
+
+      if (body.match_id !== undefined || body.public_match_id !== undefined || body.match_public_id !== undefined) {
+        const matchRef = body.match_id || body.public_match_id || body.match_public_id;
+        const match = await findMatchForSync(db, matchRef);
+        if (match) {
+          updates.push("match_id = ?");
+          params.push(match.id);
+        }
+      }
+
+      if (updates.length > 0) {
+        updates.push("updated_at = NOW()");
+        params.push(targetId);
+        await db.query(`UPDATE games SET ${updates.join(", ")} WHERE id = ?`, params);
+      }
+
+      console.log(`[sync-api] game updated id=${targetId}`);
+      return res.json({
+        success: true,
+        received: 1,
+        created: 0,
+        updated: 1,
+        failed: 0,
+        errors: [],
+        id: targetId,
+        data: { id: targetId },
+      });
+    }
+
+    // Recreate missing game (table wipe / deleted row)
+    const matchRef = body.match_id || body.public_match_id || body.match_public_id;
+    const match = matchRef ? await findMatchForSync(db, matchRef) : null;
+    if (!match) {
+      // Soft 200-style recovery path is not possible without match; still avoid bare 404 wording
       return res.status(404).json({
         success: false,
-        code: "NOT_FOUND",
-        message: "Game not found",
+        code: "MATCH_NOT_SYNCED",
+        message: `Game ${gameId} not found and match_id=${matchRef || "missing"} is not on production. Push matches first, then games.`,
         received: 1,
         created: 0,
         updated: 0,
         failed: 1,
-        errors: [{ message: "Game not found" }],
+        errors: [{ message: "Cannot recreate game without a synced match" }],
       });
     }
-    console.log(`[sync-api] game updated id=${gameId}`);
-    res.json({
-      success: true,
-      received: 1,
-      created: 0,
-      updated: 1,
-      failed: 0,
-      errors: [],
-      id: gameId,
-      data: { id: gameId },
-    });
+
+    const gNo = parsePositiveInt(body.game_no) || 1;
+    const status = normalizedStatus || "setup";
+    const wId = parsePositiveInt(body.winner_team_id) || null;
+    const finishedAt = body.finished_at || null;
+
+    // Prefer explicit id so Controller public_game_id stays valid
+    try {
+      await db.query(
+        `INSERT INTO games (id, match_id, game_no, winner_team_id, status, finished_at, public_game_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [gameId, match.id, gNo, wId, status, finishedAt, gameId]
+      );
+      if (db.client === "postgres") {
+        try {
+          await db.query(
+            `SELECT setval(pg_get_serial_sequence('games', 'id'), GREATEST((SELECT MAX(id) FROM games), ?))`,
+            [gameId]
+          );
+        } catch (_) {
+          /* ignore */
+        }
+      }
+      console.log(`[sync-api] game recreated id=${gameId} match=${match.id}`);
+      return res.json({
+        success: true,
+        received: 1,
+        created: 1,
+        updated: 0,
+        failed: 0,
+        errors: [],
+        id: gameId,
+        recreated: true,
+        data: { id: gameId },
+      });
+    } catch (insertErr) {
+      // Fallback: upsert by match_id + game_no
+      const result = await upsertGameForMatch(db, match.id, {
+        game_no: gNo,
+        status,
+        winner_team_id: wId,
+        finished_at: finishedAt,
+        public_game_id: gameId,
+      });
+      if (result.error) throw new Error(result.error);
+      console.log(`[sync-api] game upserted after recreate-fail id=${result.id} match=${match.id}`);
+      return res.json({
+        success: true,
+        received: 1,
+        created: result.created,
+        updated: result.updated,
+        failed: 0,
+        errors: [],
+        id: result.id,
+        data: { id: result.id },
+      });
+    }
   } catch (error) {
     if (
       error.code === "ER_DUP_ENTRY" ||
@@ -1063,7 +1129,7 @@ router.put("/games/:id", async (req, res) => {
     res.status(500).json({
       success: false,
       code: "DATABASE_ERROR",
-      message: "Database error",
+      message: error.message || "Database error",
       received: 1,
       created: 0,
       updated: 0,
