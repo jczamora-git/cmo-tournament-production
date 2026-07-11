@@ -68,17 +68,33 @@ function getRoundTitle(bracketSize, roundNo) {
 
 function generateSingleEliminationBracket(participants, options = {}) {
   const includeThirdPlace = Boolean(options.includeThirdPlace);
-  const normalizedParticipants = [...participants]
+  const normalizedParticipants = [...(participants || [])]
     .map((participant) => ({
-      team_id: Number(participant.team_id),
-      seed: Number(participant.seed),
-      name: participant.name || `Team ${participant.team_id}`,
+      team_id:
+        participant.team_id != null && Number(participant.team_id) > 0
+          ? Number(participant.team_id)
+          : null,
+      seed: Number(participant.seed) || 0,
+      name: participant.name || (participant.team_id ? `Team ${participant.team_id}` : "TBD"),
     }))
+    .filter((participant) => participant.seed > 0)
     .sort((left, right) => left.seed - right.seed);
 
-  const participantCount = normalizedParticipants.length;
-  const bracketSize = nextPowerOfTwo(participantCount);
-  const byes = bracketSize - participantCount;
+  const participantCount = normalizedParticipants.filter((p) => p.team_id).length;
+  const listedCount = normalizedParticipants.length;
+  const maxSeed = Math.max(0, ...normalizedParticipants.map((p) => p.seed || 0));
+
+  // Prefer an explicit bracket size (from stored rounds/nodes) so we never
+  // collapse a 16-team tree (Top 16 → …) into an 8-team tree (QF → …)
+  // just because fewer seeds/teams are currently filled.
+  const forcedSize = options.bracketSize
+    ? nextPowerOfTwo(Number(options.bracketSize) || 0)
+    : 0;
+  const fromList = listedCount >= 2 ? nextPowerOfTwo(listedCount) : 0;
+  const fromTeams = participantCount >= 2 ? nextPowerOfTwo(participantCount) : 0;
+  const fromMaxSeed = maxSeed >= 2 ? nextPowerOfTwo(maxSeed) : 0;
+  const bracketSize = Math.max(forcedSize, fromList, fromTeams, fromMaxSeed, 2);
+  const byes = Math.max(0, bracketSize - participantCount);
   const roundCount = Math.log2(bracketSize);
   const roundModes = options.roundModes || {};
   const participantBySeed = new Map(
@@ -88,12 +104,24 @@ function generateSingleEliminationBracket(participants, options = {}) {
   let currentSlots = getSeedOrder(bracketSize).map((seed) => {
     const participant = participantBySeed.get(seed);
 
-    if (participant) {
+    if (participant?.team_id) {
       return {
         team_id: participant.team_id,
         seed: participant.seed,
         name: participant.name,
         isBye: false,
+        sourceRef: null,
+        autoAdvanced: false,
+      };
+    }
+
+    // Empty seed slot inside a larger forced bracket → BYE (or TBD if name set without team)
+    if (participant && !participant.team_id && participant.name && participant.name !== "TBD") {
+      return {
+        team_id: null,
+        seed,
+        name: participant.name,
+        isBye: String(participant.name).toUpperCase() === "BYE",
         sourceRef: null,
         autoAdvanced: false,
       };

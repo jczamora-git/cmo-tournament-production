@@ -9,7 +9,10 @@
  */
 const express = require("express");
 const db = require("../db");
-const { generateSingleEliminationBracket } = require("../services/bracketGenerator");
+const {
+  generateSingleEliminationBracket,
+  nextPowerOfTwo,
+} = require("../services/bracketGenerator");
 
 const router = express.Router();
 
@@ -17,6 +20,142 @@ function toInt(v) {
   if (v === undefined || v === null || v === "") return null;
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Parse node_key like R1M3 / B3M1 → { round, matchIndex } or null.
+ */
+function parseNodeKey(nodeKey) {
+  const key = String(nodeKey || "").trim().toUpperCase();
+  const se = key.match(/^R(\d+)M(\d+)$/);
+  if (se) return { side: "winners", round: Number(se[1]), matchIndex: Number(se[2]) };
+  const third = key.match(/^B3M(\d+)$/);
+  if (third) return { side: "third", round: null, matchIndex: Number(third[1]) };
+  return null;
+}
+
+/**
+ * Load stored bracket_rounds for dynamic titles/order (Controller parity).
+ */
+async function loadBracketRounds(connection, bracketId) {
+  const queries = [
+    `SELECT id, name, round_no, round_number, sort_order, default_series_format, bracket_side
+     FROM bracket_rounds WHERE bracket_id = ?
+     ORDER BY COALESCE(round_no, round_number, sort_order, id) ASC`,
+    `SELECT id, name, round_no, round_number, sort_order
+     FROM bracket_rounds WHERE bracket_id = ?
+     ORDER BY COALESCE(round_no, round_number, sort_order, id) ASC`,
+    `SELECT id, name, round_number AS round_no, sort_order
+     FROM bracket_rounds WHERE bracket_id = ?
+     ORDER BY COALESCE(round_number, sort_order, id) ASC`,
+    `SELECT id, name, round_no, sort_order
+     FROM bracket_rounds WHERE bracket_id = ?
+     ORDER BY COALESCE(round_no, sort_order, id) ASC`,
+  ];
+  for (const sql of queries) {
+    try {
+      const [rows] = await connection.query(sql, [bracketId]);
+      return (rows || []).filter((r) => {
+        const name = String(r.name || "");
+        // Keep main-tree rounds only (3rd place is separate panel)
+        return !/third|battle for 3|3rd/i.test(name);
+      });
+    } catch (_) {
+      /* try next */
+    }
+  }
+  return [];
+}
+
+/**
+ * Infer full SE bracket size so we never drop Top 16 when only 8 teams are filled.
+ * Priority: explicit settings → R1 node match count → stored round names → seeds.
+ */
+function inferBracketSize({ seeds = [], liveRows = [], storedRounds = [], settings = {} }) {
+  const candidates = [];
+
+  const opts = settings.options || {};
+  const explicit =
+    toInt(opts.bracketSize) ||
+    toInt(opts.bracket_size) ||
+    toInt(settings.bracket_size) ||
+    toInt(settings.bracketSize);
+  if (explicit && explicit >= 2) candidates.push(nextPowerOfTwo(explicit));
+
+  // node_key R1M8 → at least 8 first-round matches → size 16
+  const r1MatchIndexes = new Set();
+  let maxRound = 0;
+  for (const row of liveRows) {
+    const parsed = parseNodeKey(row.node_key);
+    if (!parsed || parsed.side !== "winners") continue;
+    maxRound = Math.max(maxRound, parsed.round);
+    if (parsed.round === 1 && parsed.matchIndex > 0) {
+      r1MatchIndexes.add(parsed.matchIndex);
+    }
+  }
+  if (r1MatchIndexes.size > 0) {
+    const r1Count = Math.max(...r1MatchIndexes);
+    candidates.push(nextPowerOfTwo(r1Count * 2));
+  }
+  // e.g. 4 rounds → size 16 if R1 unknown but we have R1..R4 keys
+  if (maxRound >= 2) {
+    candidates.push(2 ** maxRound);
+  }
+
+  // Stored round names: "Top 16" forces 16, "Top 32" forces 32, etc.
+  for (const r of storedRounds) {
+    const name = String(r.name || "");
+    const top = name.match(/top\s*(\d+)/i);
+    if (top) candidates.push(nextPowerOfTwo(Number(top[1])));
+    if (/elimination/i.test(name) && !/quarter|semi|final/i.test(name)) {
+      // Opening "Elimination" round usually means size ≥ 32
+      candidates.push(32);
+    }
+  }
+  // N main rounds (no third) ≈ log2(size)
+  const mainRoundCount = storedRounds.length;
+  if (mainRoundCount >= 2 && mainRoundCount <= 8) {
+    candidates.push(2 ** mainRoundCount);
+  }
+
+  // Seeds
+  const seedNos = seeds
+    .map((s) => toInt(s.seed_no ?? s.seed))
+    .filter((n) => n != null && n > 0);
+  if (seedNos.length) {
+    candidates.push(nextPowerOfTwo(Math.max(...seedNos)));
+    const withTeams = seeds.filter((s) => toInt(s.team_id)).length;
+    if (withTeams >= 2) candidates.push(nextPowerOfTwo(withTeams));
+  }
+
+  const size = Math.max(2, ...candidates.filter((n) => Number.isFinite(n) && n >= 2));
+  return nextPowerOfTwo(size);
+}
+
+/**
+ * Apply stored bracket_rounds titles/modes onto generator rounds (left→right order).
+ */
+function applyStoredRoundMeta(structure, storedRounds, roundModes = {}) {
+  if (!structure?.rounds?.length || !storedRounds?.length) return structure;
+
+  const meta = storedRounds.map((r, i) => ({
+    title: r.name || null,
+    mode: r.default_series_format || roundModes[r.name] || null,
+    round_no: toInt(r.round_no ?? r.round_number) || i + 1,
+  }));
+
+  structure.rounds = structure.rounds.map((round, index) => {
+    const m = meta[index];
+    if (!m) return round;
+    return {
+      ...round,
+      title: m.title || round.title,
+      mode: m.mode || round.mode || roundModes[m.title] || roundModes[round.title],
+      // Keep generator round_no for R{n} keys; expose stored for UI if needed
+      stored_round_no: m.round_no,
+    };
+  });
+  return structure;
 }
 
 async function loadBracket(connection, idParam) {
@@ -410,7 +549,11 @@ router.get("/:id/preview", async (req, res) => {
       });
     }
 
-    // Seeds (Controller table: bracket_seeds) — preferred source for generator tree
+    // Live nodes + stored rounds first — drive full tree size (Top 16 must not be skipped)
+    const liveRows = await loadLiveNodesByKey(connection, bracketId);
+    const storedRounds = await loadBracketRounds(connection, bracketId);
+
+    // Seeds (Controller table: bracket_seeds) — preferred participant list
     let seeds = [];
     const seedQueries = [
       `SELECT bs.team_id, bs.seed_no,
@@ -432,72 +575,102 @@ router.get("/:id/preview", async (req, res) => {
     for (const sql of seedQueries) {
       try {
         const [seedRows] = await connection.query(sql, [bracketId]);
-        seeds = seedRows;
+        seeds = seedRows || [];
         break;
       } catch (seedErr) {
         console.warn("[brackets] seeds query variant failed:", seedErr.message);
       }
     }
 
-    if (seeds.length < 2) {
-      // Try building participants from R1 nodes/matches
-      const live = await loadLiveNodesByKey(connection, bracketId);
-      const r1 = live
-        .filter((n) => String(n.node_key || "").startsWith("R1"))
-        .sort((a, b) => String(a.node_key).localeCompare(String(b.node_key)));
-      const participants = [];
+    // Fallback participants from R1 match slots (does NOT shrink bracket size)
+    if (seeds.filter((s) => toInt(s.team_id)).length < 2) {
+      const r1 = liveRows
+        .filter((n) => parseNodeKey(n.node_key)?.round === 1)
+        .sort((a, b) => {
+          const pa = parseNodeKey(a.node_key);
+          const pb = parseNodeKey(b.node_key);
+          return (pa?.matchIndex || 0) - (pb?.matchIndex || 0);
+        });
+      const participantsFromR1 = [];
       let seed = 1;
       for (const n of r1) {
         if (n.blue_team_id) {
-          participants.push({
+          participantsFromR1.push({
             team_id: Number(n.blue_team_id),
-            seed: seed++,
+            seed_no: seed++,
             name: n.blue_team_name || n.blue_team_short || `Team ${n.blue_team_id}`,
           });
         }
         if (n.red_team_id) {
-          participants.push({
+          participantsFromR1.push({
             team_id: Number(n.red_team_id),
-            seed: seed++,
+            seed_no: seed++,
             name: n.red_team_name || n.red_team_short || `Team ${n.red_team_id}`,
           });
         }
       }
-      if (participants.length < 2) {
-        return res.status(400).json({
-          success: false,
-          message: "Bracket has fewer than 2 seeds; cannot build preview",
-        });
+      if (participantsFromR1.length >= 2) {
+        seeds = participantsFromR1;
       }
-      seeds = participants.map((p) => ({
-        team_id: p.team_id,
-        seed_no: p.seed,
-        name: p.name,
-      }));
+    }
+
+    const bracketSize = inferBracketSize({
+      seeds,
+      liveRows,
+      storedRounds,
+      settings,
+    });
+
+    // Still nothing structural? Cannot build tree
+    const hasStructureHint =
+      seeds.filter((s) => toInt(s.team_id)).length >= 2 ||
+      liveRows.some((n) => parseNodeKey(n.node_key)?.side === "winners") ||
+      storedRounds.length >= 2;
+
+    if (!hasStructureHint && bracketSize < 4) {
+      return res.status(400).json({
+        success: false,
+        message: "Bracket has fewer than 2 seeds; cannot build preview",
+      });
     }
 
     const roundModes = settings.roundModes || {};
     const options = settings.options || {};
-    const participants = seeds.map((s) => ({
-      team_id: Number(s.team_id),
-      seed: Number(s.seed_no ?? s.seed),
-      name: s.name || `Team ${s.team_id}`,
-    }));
+    let participants = seeds
+      .map((s) => ({
+        team_id: toInt(s.team_id),
+        seed: toInt(s.seed_no ?? s.seed) || 0,
+        name: s.name || (s.team_id ? `Team ${s.team_id}` : "TBD"),
+      }))
+      .filter((p) => p.seed > 0);
+
+    // Guarantee generator has ≥2 listed seeds when we only have size from nodes/rounds
+    if (participants.length < 2) {
+      participants = [
+        { team_id: null, seed: 1, name: "TBD" },
+        { team_id: null, seed: 2, name: "TBD" },
+      ];
+    }
 
     let structure = generateSingleEliminationBracket(participants, {
       roundModes,
+      bracketSize, // ← critical: keep Top 16 when size is 16 even if only 8 teams filled
       bracketType: options.bracketType || bracketRow.bracket_type || "single_elimination",
       seedingMode: options.seedingMode || "manual",
       includeThirdPlace:
         options.includeThirdPlace != null
           ? options.includeThirdPlace
-          : Boolean(bracketRow.third_place_enabled),
+          : Boolean(bracketRow.third_place_enabled) ||
+            liveRows.some((n) => parseNodeKey(n.node_key)?.side === "third") ||
+            /third/i.test(JSON.stringify(settings)),
       thirdPlaceMode: roundModes["Battle for Third"],
     });
 
+    // Prefer Controller-synced round names (Top 16, Quarter-Finals, …) over generator defaults
+    structure = applyStoredRoundMeta(structure, storedRounds, roundModes);
+
     // Overlay live match state by node_key (R1M1, R2M1, B3M1, …)
     try {
-      const liveRows = await loadLiveNodesByKey(connection, bracketId);
       structure = applyLiveOverlay(structure, liveRows);
     } catch (overlayErr) {
       console.warn("[brackets] live overlay skipped:", overlayErr.message);
@@ -512,6 +685,13 @@ router.get("/:id/preview", async (req, res) => {
       tournament_mode_name: tournamentModeName,
       is_group_stage: false,
       bracket: structure,
+      meta: {
+        inferred_bracket_size: bracketSize,
+        seed_count: seeds.length,
+        stored_round_count: storedRounds.length,
+        node_count: liveRows.length,
+        round_titles: (structure.rounds || []).map((r) => r.title),
+      },
     });
   } catch (error) {
     console.error("Failed to build public bracket preview", error);
