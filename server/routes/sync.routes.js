@@ -358,72 +358,56 @@ router.post("/matches", async (req, res) => {
     }
     const compType = modeRows[0].competition_type;
 
-    let bId = parsePositiveInt(blue_team_id);
-    let rId = parsePositiveInt(red_team_id);
+    // Allow TBD / single-side slots (bracket later rounds waiting for winner).
+    // null blue_team_id and/or red_team_id is valid for public bracket preview.
+    let bId = parsePositiveInt(blue_team_id) || null;
+    let rId = parsePositiveInt(red_team_id) || null;
 
-    if (compType === "head_to_head") {
-      if (!bId || !rId) {
-        connection.release();
-        return res.status(400).json({
-          success: false,
-          code: "VALIDATION_ERROR",
-          message: "Both blue_team_id and red_team_id are required for head_to_head",
-          received: 1,
-          created: 0,
-          updated: 0,
-          failed: 1,
-          errors: [{ message: "Both blue_team_id and red_team_id are required for head_to_head" }],
-        });
-      }
-      if (bId === rId) {
-        connection.release();
-        return res.status(400).json({
-          success: false,
-          code: "VALIDATION_ERROR",
-          message: "Teams must be different",
-          received: 1,
-          created: 0,
-          updated: 0,
-          failed: 1,
-          errors: [{ message: "Teams must be different" }],
-        });
-      }
+    if (bId && rId && bId === rId) {
+      connection.release();
+      return res.status(400).json({
+        success: false,
+        code: "VALIDATION_ERROR",
+        message: "Teams must be different",
+        received: 1,
+        created: 0,
+        updated: 0,
+        failed: 1,
+        errors: [{ message: "Teams must be different" }],
+      });
+    }
 
+    // Only validate team rows that are actually present (skip null TBD sides)
+    const teamIdsToCheck = [bId, rId].filter((id) => id != null);
+    if (teamIdsToCheck.length > 0) {
+      const placeholders = teamIdsToCheck.map(() => "?").join(", ");
       const [teams] = await connection.query(
-        `SELECT id, tournament_id, tournament_mode_id FROM teams WHERE id IN (?, ?)`,
-        [bId, rId]
+        `SELECT id, tournament_id, tournament_mode_id FROM teams WHERE id IN (${placeholders})`,
+        teamIdsToCheck
       );
-      if (teams.length !== 2) {
-        connection.release();
-        return res.status(400).json({
-          success: false,
-          code: "VALIDATION_ERROR",
-          message: "One or both teams do not exist",
-          received: 1,
-          created: 0,
-          updated: 0,
-          failed: 1,
-          errors: [{ message: "One or both teams do not exist" }],
-        });
-      }
-      for (const t of teams) {
-        if (t.tournament_id !== tId || t.tournament_mode_id !== mId) {
-          connection.release();
-          return res.status(400).json({
-            success: false,
-            code: "VALIDATION_ERROR",
-            message: "Teams do not belong to the requested tournament mode",
-            received: 1,
-            created: 0,
-            updated: 0,
-            failed: 1,
-            errors: [{ message: "Teams do not belong to the requested tournament mode" }],
-          });
+      if (teams.length !== teamIdsToCheck.length) {
+        // Soft: drop unknown team ids to null rather than hard-fail the whole match
+        const found = new Set(teams.map((t) => Number(t.id)));
+        if (bId && !found.has(Number(bId))) {
+          console.warn(`[sync-api] match create: blue_team_id=${bId} not found — storing null`);
+          bId = null;
+        }
+        if (rId && !found.has(Number(rId))) {
+          console.warn(`[sync-api] match create: red_team_id=${rId} not found — storing null`);
+          rId = null;
         }
       }
-    } else {
-      bId = bId || null;
-      rId = rId || null;
+      for (const t of teams) {
+        if (
+          Number(t.tournament_id) !== Number(tId) ||
+          Number(t.tournament_mode_id) !== Number(mId)
+        ) {
+          // Soft warn only — controller may map teams across slight context drift
+          console.warn(
+            `[sync-api] team ${t.id} mode/tournament mismatch (expected t=${tId}/m=${mId}, got t=${t.tournament_id}/m=${t.tournament_mode_id}) — still accepting`
+          );
+        }
+      }
     }
 
     const normalizedStatus = normalizeStatus(status) || "queued";
