@@ -2550,8 +2550,15 @@ router.post("/brackets", async (req, res) => {
           item.winner_to_public_node_id
         );
 
+        // Live PG requires bracket_nodes.round_id NOT NULL — never insert without a round.
         let roundId = null;
-        for (const c of [publicRoundId, item.round_id, item.roundId, item.controller_round_id]) {
+        for (const c of [
+          publicRoundId,
+          item.round_id,
+          item.roundId,
+          item.controller_round_id,
+          item.public_round_id,
+        ]) {
           const key = pickControllerKey(c);
           if (key && roundIdByKey.has(key)) {
             roundId = roundIdByKey.get(key);
@@ -2569,28 +2576,153 @@ router.post("/brackets", async (req, res) => {
           }
         }
 
-        const roundNumber = parsePositiveInt(
-          item.round_number || item.round_no || item.roundNumber
-        );
+        // Controller may send round_no / round_number / round index on the node
+        let roundNumber =
+          parsePositiveInt(
+            item.round_number ??
+              item.round_no ??
+              item.roundNumber ??
+              item.round ??
+              item.round_index ??
+              item.roundIndex
+          ) || null;
+
         if (!roundId && roundNumber) {
           roundId = roundIdByBracketAndNumber.get(roundMapKey(bracketId, roundNumber)) || null;
           if (!roundId) {
-            const [found] = await connection.query(
-              `SELECT id FROM bracket_rounds WHERE bracket_id = ? AND round_number = ? LIMIT 1`,
-              [bracketId, roundNumber]
-            );
-            if (found[0]) roundId = found[0].id;
+            // Support either round_number or round_no column on live schema
+            try {
+              const [found] = await connection.query(
+                `SELECT id FROM bracket_rounds
+                 WHERE bracket_id = ? AND (round_number = ? OR round_no = ?)
+                 LIMIT 1`,
+                [bracketId, roundNumber, roundNumber]
+              );
+              if (found[0]) roundId = found[0].id;
+            } catch (_) {
+              try {
+                const [found] = await connection.query(
+                  `SELECT id FROM bracket_rounds WHERE bracket_id = ? AND round_no = ? LIMIT 1`,
+                  [bracketId, roundNumber]
+                );
+                if (found[0]) roundId = found[0].id;
+              } catch (_) {
+                try {
+                  const [found] = await connection.query(
+                    `SELECT id FROM bracket_rounds WHERE bracket_id = ? AND round_number = ? LIMIT 1`,
+                    [bracketId, roundNumber]
+                  );
+                  if (found[0]) roundId = found[0].id;
+                } catch (_) {
+                  /* ignore */
+                }
+              }
+            }
           }
+        }
+
+        // Last resort: newest round under this bracket
+        if (!roundId) {
+          try {
+            const [anyRound] = await connection.query(
+              `SELECT id, public_round_id FROM bracket_rounds
+               WHERE bracket_id = ?
+               ORDER BY COALESCE(round_no, round_number, id) ASC
+               LIMIT 1`,
+              [bracketId]
+            );
+            if (anyRound[0]) {
+              roundId = anyRound[0].id;
+              if (!publicRoundId && anyRound[0].public_round_id) {
+                publicRoundId = Number(anyRound[0].public_round_id);
+              }
+              warnings.push({
+                code: "NODE_USED_FIRST_ROUND",
+                message: `Node linked to first available round id=${roundId} for bracket ${bracketId} (node had no round reference)`,
+              });
+            }
+          } catch (_) {
+            try {
+              const [anyRound] = await connection.query(
+                `SELECT id, public_round_id FROM bracket_rounds WHERE bracket_id = ? ORDER BY id ASC LIMIT 1`,
+                [bracketId]
+              );
+              if (anyRound[0]) {
+                roundId = anyRound[0].id;
+                if (!publicRoundId && anyRound[0].public_round_id) {
+                  publicRoundId = Number(anyRound[0].public_round_id);
+                }
+              }
+            } catch (_) {
+              /* ignore */
+            }
+          }
+        }
+
+        // Auto-create a round so NOT NULL round_id never fails node insert
+        if (!roundId) {
+          const autoRoundNo = roundNumber || 1;
+          const [result, meta] = await insertBracketRoundRow(connection, {
+            publicRoundId: publicRoundId || null,
+            bracketId,
+            publicBracketId,
+            name: `Round ${autoRoundNo}`,
+            roundNumber: autoRoundNo,
+            sortOrder: autoRoundNo,
+          });
+          roundId = getInsertId(result, meta);
+          if (!roundId) {
+            throw new Error(
+              `bracket_node: cannot resolve round_id and auto-create round failed for bracket_id=${bracketId}`
+            );
+          }
+          if (!publicRoundId) {
+            try {
+              await connection.query(
+                `UPDATE bracket_rounds SET public_round_id = COALESCE(public_round_id, ?) WHERE id = ?`,
+                [roundId, roundId]
+              );
+              publicRoundId = roundId;
+            } catch (_) {
+              publicRoundId = roundId;
+            }
+          }
+          roundNumber = autoRoundNo;
+          rememberRoundKeys(roundId, publicRoundId || roundId, item, bracketId, autoRoundNo);
+          roundIdByBracketAndNumber.set(roundMapKey(bracketId, autoRoundNo), roundId);
+          stats.created += 1;
+          warnings.push({
+            code: "AUTO_CREATED_ROUND_FOR_NODE",
+            message: `Auto-created bracket_round id=${roundId} round_no=${autoRoundNo} for node (round_id is NOT NULL on production)`,
+          });
+          mappings.rounds.push({
+            public_bracket_id: publicBracketId,
+            public_round_id: publicRoundId || roundId,
+            id: roundId,
+            round_no: autoRoundNo,
+            created: true,
+            auto_for_node: true,
+          });
         }
 
         // Load public_round_id for response if we only have production round id
         if (roundId && !publicRoundId) {
-          const [rrow] = await connection.query(
-            `SELECT public_round_id FROM bracket_rounds WHERE id = ? LIMIT 1`,
-            [roundId]
+          try {
+            const [rrow] = await connection.query(
+              `SELECT public_round_id FROM bracket_rounds WHERE id = ? LIMIT 1`,
+              [roundId]
+            );
+            if (rrow[0]?.public_round_id) publicRoundId = Number(rrow[0].public_round_id);
+            else publicRoundId = roundId;
+          } catch (_) {
+            publicRoundId = roundId;
+          }
+        }
+
+        if (!roundId) {
+          throw new Error(
+            `bracket_node: round_id is required (NOT NULL) but could not be resolved. Provide public_round_id, round_id, or round_no on the node, or sync bracket_rounds first.`
           );
-          if (rrow[0]?.public_round_id) publicRoundId = Number(rrow[0].public_round_id);
-          else publicRoundId = roundId;
         }
 
         let matchId = parsePositiveInt(item.match_id || item.matchId) || null;
@@ -2750,9 +2882,14 @@ router.post("/brackets", async (req, res) => {
               sql: `INSERT INTO bracket_nodes (bracket_id, round_id, match_id) VALUES (?, ?, ?)`,
               params: [bracketId, roundId, matchId],
             },
+            // Never insert without round_id — live PG enforces NOT NULL
             {
-              sql: `INSERT INTO bracket_nodes (bracket_id, position) VALUES (?, ?)`,
-              params: [bracketId, position],
+              sql: `INSERT INTO bracket_nodes (bracket_id, round_id, position) VALUES (?, ?, ?)`,
+              params: [bracketId, roundId, position],
+            },
+            {
+              sql: `INSERT INTO bracket_nodes (bracket_id, round_id) VALUES (?, ?)`,
+              params: [bracketId, roundId],
             },
           ];
 
