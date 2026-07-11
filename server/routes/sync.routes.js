@@ -2035,7 +2035,11 @@ router.post("/brackets", async (req, res) => {
       }
     }
 
-    await connection.beginTransaction();
+    // IMPORTANT (Postgres): do NOT wrap bracket + rounds + nodes in one transaction.
+    // Schema-fallback inserts (round_no vs round_number) may fail once; inside a single
+    // transaction that aborts all following commands with:
+    // "current transaction is aborted, commands ignored until end of transaction block"
+    // Each record is processed independently; errors are collected per item.
 
     /**
      * Create or update one bracket row. Used for payload brackets[] and auto-create.
@@ -2491,14 +2495,24 @@ router.post("/brackets", async (req, res) => {
         });
       } catch (err) {
         stats.failed += 1;
+        const failedRoundNo = safePositiveInt(
+          item?.round_no ?? item?.round_number ?? item?.roundNumber ?? item?.order,
+          0
+        );
         stats.errors.push({
           entity: "bracket_round",
+          type: "bracket_round",
           item: "bracket_round",
           public_bracket_id: item?.public_bracket_id ?? null,
           public_round_id: item?.public_round_id ?? item?.id ?? null,
+          round_no: failedRoundNo || null,
           error: err.message,
           message: err.message,
         });
+        console.error(
+          `[sync-api] bracket_round failed round_no=${failedRoundNo || "?"} :`,
+          err.message
+        );
       }
     }
 
@@ -2817,45 +2831,52 @@ router.post("/brackets", async (req, res) => {
       }
     }
 
-    // Resolve next_node_id from next_public_node_id / controller keys
+    // Resolve next_node_id from next_public_node_id / controller keys (best-effort, non-fatal)
     if (nodeIdByKey.size > 0) {
       const seenLocal = new Set();
       for (const localNodeId of nodeIdByKey.values()) {
-        if (seenLocal.has(localNodeId)) continue;
-        seenLocal.add(localNodeId);
+        try {
+          if (seenLocal.has(localNodeId)) continue;
+          seenLocal.add(localNodeId);
 
-        const [rows] = await connection.query(
-          `SELECT next_public_node_id FROM bracket_nodes WHERE id = ?`,
-          [localNodeId]
-        );
-        const nextRef = rows[0]?.next_public_node_id;
-        if (nextRef == null || nextRef === "") continue;
-
-        let nextLocal =
-          nodeIdByKey.get(String(nextRef)) ||
-          nodeIdByKey.get(String(Number(nextRef))) ||
-          null;
-        if (!nextLocal) {
-          const n = parsePositiveInt(nextRef);
-          if (n) {
-            const [found] = await connection.query(
-              `SELECT id FROM bracket_nodes WHERE public_node_id = ? OR id = ? LIMIT 1`,
-              [n, n]
-            );
-            nextLocal = found[0]?.id || null;
-          }
-        }
-
-        if (nextLocal) {
-          await connection.query(
-            `UPDATE bracket_nodes SET next_node_id = ?, updated_at = NOW() WHERE id = ?`,
-            [nextLocal, localNodeId]
+          const [rows] = await connection.query(
+            `SELECT next_public_node_id FROM bracket_nodes WHERE id = ?`,
+            [localNodeId]
           );
+          const nextRef = rows[0]?.next_public_node_id;
+          if (nextRef == null || nextRef === "") continue;
+
+          let nextLocal =
+            nodeIdByKey.get(String(nextRef)) ||
+            nodeIdByKey.get(String(Number(nextRef))) ||
+            null;
+          if (!nextLocal) {
+            const n = parsePositiveInt(nextRef);
+            if (n) {
+              const [found] = await connection.query(
+                `SELECT id FROM bracket_nodes WHERE public_node_id = ? OR id = ? LIMIT 1`,
+                [n, n]
+              );
+              nextLocal = found[0]?.id || null;
+            }
+          }
+
+          if (nextLocal) {
+            await connection.query(
+              `UPDATE bracket_nodes SET next_node_id = ?, updated_at = NOW() WHERE id = ?`,
+              [nextLocal, localNodeId]
+            );
+          }
+        } catch (linkErr) {
+          console.error(`[sync-api] next_node link failed for node ${localNodeId}:`, linkErr.message);
+          warnings.push({
+            code: "NEXT_NODE_LINK_FAILED",
+            message: `Could not link next_node for node id=${localNodeId}: ${linkErr.message}`,
+          });
         }
       }
     }
 
-    await connection.commit();
     connection.release();
 
     stats.success = stats.failed === 0;
@@ -2865,6 +2886,16 @@ router.post("/brackets", async (req, res) => {
       latestBracketId ||
       null;
     const primaryProductionId = latestBracketId || mappings.brackets[0]?.id || null;
+
+    const formattedErrors = (stats.errors || []).map((e) => ({
+      type: e.entity || e.item || e.type || "unknown",
+      item: e.entity || e.item || "unknown",
+      public_bracket_id: e.public_bracket_id ?? null,
+      public_round_id: e.public_round_id ?? null,
+      public_node_id: e.public_node_id ?? null,
+      round_no: e.round_no ?? e.round_number ?? null,
+      error: e.message || e.error || "unknown",
+    }));
 
     const response = {
       ...stats,
@@ -2883,25 +2914,25 @@ router.post("/brackets", async (req, res) => {
         created: stats.created,
         updated: stats.updated,
         failed: stats.failed,
-        errors: stats.errors,
+        errors: formattedErrors,
         warnings,
       },
       mappings,
+      errors: formattedErrors,
     };
 
     console.log(
       `[sync-api] brackets sync received=${stats.received} created=${stats.created} updated=${stats.updated} failed=${stats.failed} public_bracket_id=${response.public_bracket_id}`
     );
 
-    // Partial success → 200; total failure with errors → 400 with detailed messages
+    // Partial success → 200 (parent may succeed while some children fail)
     if (stats.created + stats.updated === 0 && stats.failed > 0) {
-      const firstErrors = (stats.errors || []).slice(0, 5);
-      const detail = firstErrors
+      const detail = formattedErrors
+        .slice(0, 5)
         .map((e) => {
-          const who = e.entity || e.item || "item";
-          const idPart =
-            e.public_bracket_id || e.public_round_id || e.public_node_id || e.item || "";
-          return `${who}${idPart ? `(${idPart})` : ""}: ${e.message || e.error || "unknown"}`;
+          const who = e.type || "item";
+          const idPart = e.round_no || e.public_round_id || e.public_node_id || e.public_bracket_id || "";
+          return `${who}${idPart ? `(${idPart})` : ""}: ${e.error}`;
         })
         .join(" | ");
 
@@ -2912,36 +2943,18 @@ router.post("/brackets", async (req, res) => {
         message: detail
           ? `Bracket sync failed for all items. ${detail}`
           : "Bracket sync failed for all items. See errors for details.",
-        errors: (stats.errors || []).map((e) => ({
-          item: e.entity || e.item || "unknown",
-          public_bracket_id: e.public_bracket_id ?? null,
-          public_round_id: e.public_round_id ?? null,
-          public_node_id: e.public_node_id ?? null,
-          error: e.message || e.error || "unknown",
-        })),
       });
     }
 
-    res.json({
+    const partial = stats.failed > 0;
+    res.status(200).json({
       ...response,
-      message:
-        stats.failed > 0
-          ? `Bracket sync completed with ${stats.failed} failed item(s)`
-          : "Bracket sync completed",
-      errors: (stats.errors || []).map((e) => ({
-        item: e.entity || e.item || "unknown",
-        public_bracket_id: e.public_bracket_id ?? null,
-        public_round_id: e.public_round_id ?? null,
-        public_node_id: e.public_node_id ?? null,
-        error: e.message || e.error || "unknown",
-      })),
+      success: !partial || stats.created + stats.updated > 0,
+      message: partial
+        ? `Some child records failed (${stats.failed}). Bracket public_bracket_id=${response.public_bracket_id}`
+        : "Bracket sync completed",
     });
   } catch (error) {
-    try {
-      await connection.rollback();
-    } catch (_) {
-      /* ignore */
-    }
     try {
       connection.release();
     } catch (_) {
@@ -2953,11 +2966,20 @@ router.post("/brackets", async (req, res) => {
       code: "DATABASE_ERROR",
       message: error.message || "Database error",
       received,
-      created: 0,
-      updated: 0,
-      failed: received || 1,
-      errors: [{ message: error.message }],
+      created: stats.created || 0,
+      updated: stats.updated || 0,
+      failed: (stats.failed || 0) + 1,
+      errors: [
+        ...(stats.errors || []).map((e) => ({
+          type: e.entity || e.item || "unknown",
+          error: e.message || e.error || "unknown",
+          round_no: e.round_no ?? null,
+        })),
+        { type: "server", error: error.message },
+      ],
       warnings,
+      public_bracket_id: latestPublicBracketId || latestBracketId || null,
+      mappings,
     });
   }
 });
