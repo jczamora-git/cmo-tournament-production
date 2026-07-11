@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { getTournaments } from "../../../services/api";
 import { apiUrl } from "../../../config/api";
-import { CalendarDays, Clapperboard, GitFork, Radio, Trophy, UserPlus } from "lucide-react";
+import { CalendarDays, Clapperboard, GitFork, ListOrdered, Radio, Trophy, UserPlus } from "lucide-react";
 
 const MODAL_KEY = "jeizi_registration_modal_dismissed";
 
@@ -343,9 +343,15 @@ function PublicHome() {
             },
             {
               title: "Tournament Bracket",
-              description: "View elimination bracket and team standings.",
+              description: "View elimination bracket and progression.",
               icon: GitFork,
               to: "/bracket",
+            },
+            {
+              title: "BR Standings",
+              description: "View Battle Royale group standings and point totals.",
+              icon: ListOrdered,
+              to: "/standings",
             },
           ].map((item, index) => {
             const Icon = item.icon;

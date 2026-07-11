@@ -11,6 +11,59 @@ function parsePositiveInt(val) {
   return Number.isInteger(num) && num > 0 ? num : null;
 }
 
+function parseNonNegInt(val, fallback = 0) {
+  if (val === undefined || val === null || val === "") return fallback;
+  const num = Number(val);
+  return Number.isInteger(num) && num >= 0 ? num : null;
+}
+
+function toBool(val) {
+  if (val === true || val === 1 || val === "1" || val === "true") return true;
+  if (val === false || val === 0 || val === "0" || val === "false" || val === null || val === undefined) {
+    return false;
+  }
+  return Boolean(val);
+}
+
+function buildBrStandingsUpsertSql() {
+  if (db.client === "postgres") {
+    return `
+      INSERT INTO br_group_standings (
+        tournament_id, tournament_mode_id, group_name, team_id,
+        kills, placement_points, kill_points, total_points, final_rank,
+        rounds_played, is_eliminated, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+      ON CONFLICT (tournament_id, tournament_mode_id, group_name, team_id)
+      DO UPDATE SET
+        kills = EXCLUDED.kills,
+        placement_points = EXCLUDED.placement_points,
+        kill_points = EXCLUDED.kill_points,
+        total_points = EXCLUDED.total_points,
+        final_rank = EXCLUDED.final_rank,
+        rounds_played = EXCLUDED.rounds_played,
+        is_eliminated = EXCLUDED.is_eliminated,
+        updated_at = NOW()
+    `;
+  }
+
+  return `
+    INSERT INTO br_group_standings (
+      tournament_id, tournament_mode_id, group_name, team_id,
+      kills, placement_points, kill_points, total_points, final_rank,
+      rounds_played, is_eliminated, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+    ON DUPLICATE KEY UPDATE
+      kills = VALUES(kills),
+      placement_points = VALUES(placement_points),
+      kill_points = VALUES(kill_points),
+      total_points = VALUES(total_points),
+      final_rank = VALUES(final_rank),
+      rounds_played = VALUES(rounds_played),
+      is_eliminated = VALUES(is_eliminated),
+      updated_at = NOW()
+  `;
+}
+
 // 5. GET /api/sync/tournaments
 router.get("/tournaments", async (req, res) => {
   try {
@@ -439,6 +492,279 @@ router.put("/games/:id", async (req, res) => {
       return res.status(409).json({ success: false, code: "DUPLICATE_GAME", message: "Game already exists for this match and number" });
     }
     console.error("[sync-api] /games/:id PUT error:", error.message);
+    res.status(500).json({ success: false, code: "DATABASE_ERROR", message: "Database error" });
+  }
+});
+
+// 13. POST /api/sync/standings/br
+// Controller pushes BR group standings (production public IDs already mapped).
+router.post("/standings/br", async (req, res) => {
+  const { tournament_id, tournament_mode_id, groups } = req.body || {};
+
+  const tId = parsePositiveInt(tournament_id);
+  const mId = parsePositiveInt(tournament_mode_id);
+
+  if (!tId || !mId) {
+    return res.status(400).json({
+      success: false,
+      code: "VALIDATION_ERROR",
+      message: "Valid tournament_id and tournament_mode_id are required",
+    });
+  }
+
+  if (!Array.isArray(groups) || groups.length === 0) {
+    return res.status(400).json({
+      success: false,
+      code: "VALIDATION_ERROR",
+      message: "groups must be a non-empty array",
+    });
+  }
+
+  // Flatten + validate payload before DB writes
+  const rows = [];
+  for (const group of groups) {
+    const groupName = group && typeof group.group_name === "string" ? group.group_name.trim() : "";
+    if (!groupName) {
+      return res.status(400).json({
+        success: false,
+        code: "VALIDATION_ERROR",
+        message: "Each group requires a non-empty group_name",
+      });
+    }
+
+    const standings = group.standings;
+    if (!Array.isArray(standings)) {
+      return res.status(400).json({
+        success: false,
+        code: "VALIDATION_ERROR",
+        message: `Group "${groupName}" must include a standings array`,
+      });
+    }
+
+    for (const s of standings) {
+      const teamId = parsePositiveInt(s && s.team_id);
+      if (!teamId) {
+        return res.status(400).json({
+          success: false,
+          code: "VALIDATION_ERROR",
+          message: `Invalid team_id in group "${groupName}"`,
+        });
+      }
+
+      const kills = parseNonNegInt(s.kills, 0);
+      const placementPoints = parseNonNegInt(s.placement_points, 0);
+      const killPoints = parseNonNegInt(s.kill_points, 0);
+      const totalPoints = parseNonNegInt(s.total_points, 0);
+      const roundsPlayed = parseNonNegInt(s.rounds_played, 0);
+
+      if (
+        kills === null ||
+        placementPoints === null ||
+        killPoints === null ||
+        totalPoints === null ||
+        roundsPlayed === null
+      ) {
+        return res.status(400).json({
+          success: false,
+          code: "VALIDATION_ERROR",
+          message: `Invalid numeric fields for team_id ${teamId} in group "${groupName}"`,
+        });
+      }
+
+      let finalRank = null;
+      if (s.final_rank !== undefined && s.final_rank !== null && s.final_rank !== "") {
+        const asNum = Number(s.final_rank);
+        if (!Number.isInteger(asNum) || asNum < 1) {
+          return res.status(400).json({
+            success: false,
+            code: "VALIDATION_ERROR",
+            message: `Invalid final_rank for team_id ${teamId} in group "${groupName}"`,
+          });
+        }
+        finalRank = asNum;
+      }
+
+      rows.push({
+        tournament_id: tId,
+        tournament_mode_id: mId,
+        group_name: groupName,
+        team_id: teamId,
+        kills,
+        placement_points: placementPoints,
+        kill_points: killPoints,
+        total_points: totalPoints,
+        final_rank: finalRank,
+        rounds_played: roundsPlayed,
+        is_eliminated: toBool(s.is_eliminated),
+      });
+    }
+  }
+
+  const connection = await db.getConnection();
+  try {
+    // Validate tournament exists
+    const [tournamentRows] = await connection.query(`SELECT id FROM tournaments WHERE id = ?`, [tId]);
+    if (tournamentRows.length === 0) {
+      connection.release();
+      return res.status(404).json({
+        success: false,
+        code: "NOT_FOUND",
+        message: `tournament_id ${tId} does not exist`,
+      });
+    }
+
+    // Validate tournament_mode exists and belongs to the tournament
+    const [modeRows] = await connection.query(
+      `SELECT id FROM tournament_modes WHERE id = ? AND tournament_id = ?`,
+      [mId, tId]
+    );
+    if (modeRows.length === 0) {
+      const [modeExists] = await connection.query(`SELECT id, tournament_id FROM tournament_modes WHERE id = ?`, [mId]);
+      connection.release();
+      if (modeExists.length === 0) {
+        return res.status(404).json({
+          success: false,
+          code: "NOT_FOUND",
+          message: `tournament_mode_id ${mId} does not exist`,
+        });
+      }
+      return res.status(400).json({
+        success: false,
+        code: "CONTEXT_MISMATCH",
+        message: "tournament_mode_id does not belong to the given tournament_id",
+      });
+    }
+
+    await connection.beginTransaction();
+    const upsertSql = buildBrStandingsUpsertSql();
+    let processed = 0;
+
+    for (const row of rows) {
+      const eliminatedParam = db.client === "postgres" ? row.is_eliminated : row.is_eliminated ? 1 : 0;
+      await connection.query(upsertSql, [
+        row.tournament_id,
+        row.tournament_mode_id,
+        row.group_name,
+        row.team_id,
+        row.kills,
+        row.placement_points,
+        row.kill_points,
+        row.total_points,
+        row.final_rank,
+        row.rounds_played,
+        eliminatedParam,
+      ]);
+      processed += 1;
+    }
+
+    await connection.commit();
+    connection.release();
+
+    console.log(`[sync-api] standings/br processed=${processed} tournament=${tId} mode=${mId}`);
+    res.json({
+      success: true,
+      message: "BR group standings synced",
+      processed,
+      upserted: processed,
+      tournament_id: tId,
+      tournament_mode_id: mId,
+    });
+  } catch (error) {
+    try {
+      await connection.rollback();
+    } catch (_) {
+      /* ignore */
+    }
+    try {
+      connection.release();
+    } catch (_) {
+      /* ignore */
+    }
+    console.error("[sync-api] /standings/br POST error:", error.message);
+    res.status(500).json({ success: false, code: "DATABASE_ERROR", message: "Database error" });
+  }
+});
+
+// 14. GET /api/sync/standings/br?tournament_id=xx&tournament_mode_id=xx
+// Fetch BR group standings (grouped, sorted by total_points DESC).
+router.get("/standings/br", async (req, res) => {
+  const tId = parsePositiveInt(req.query.tournament_id);
+  const mId = parsePositiveInt(req.query.tournament_mode_id);
+
+  if (!tId || !mId) {
+    return res.status(400).json({
+      success: false,
+      code: "VALIDATION_ERROR",
+      message: "Valid tournament_id and tournament_mode_id query params are required",
+    });
+  }
+
+  try {
+    const [rows] = await db.query(
+      `
+      SELECT
+        s.id,
+        s.tournament_id,
+        s.tournament_mode_id,
+        s.group_name,
+        s.team_id,
+        s.kills,
+        s.placement_points,
+        s.kill_points,
+        s.total_points,
+        s.final_rank,
+        s.rounds_played,
+        s.is_eliminated,
+        s.eliminated_at,
+        s.updated_at,
+        t.name AS team_name,
+        t.shortname AS team_shortname,
+        t.logo AS team_logo
+      FROM br_group_standings s
+      LEFT JOIN teams t ON t.id = s.team_id
+      WHERE s.tournament_id = ? AND s.tournament_mode_id = ?
+      ORDER BY s.group_name ASC, s.total_points DESC, s.kills DESC, s.final_rank ASC, s.team_id ASC
+      `,
+      [tId, mId]
+    );
+
+    const groupMap = new Map();
+    for (const row of rows) {
+      const key = row.group_name;
+      if (!groupMap.has(key)) {
+        groupMap.set(key, {
+          group_name: key,
+          standings: [],
+        });
+      }
+
+      groupMap.get(key).standings.push({
+        id: row.id,
+        team_id: row.team_id,
+        team_name: row.team_name || null,
+        team_shortname: row.team_shortname || null,
+        team_logo: row.team_logo || null,
+        kills: row.kills ?? 0,
+        placement_points: row.placement_points ?? 0,
+        kill_points: row.kill_points ?? 0,
+        total_points: row.total_points ?? 0,
+        final_rank: row.final_rank,
+        rounds_played: row.rounds_played ?? 0,
+        is_eliminated: toBool(row.is_eliminated),
+        eliminated_at: row.eliminated_at || null,
+        updated_at: row.updated_at || null,
+      });
+    }
+
+    res.json({
+      success: true,
+      tournament_id: tId,
+      tournament_mode_id: mId,
+      processed: rows.length,
+      groups: Array.from(groupMap.values()),
+    });
+  } catch (error) {
+    console.error("[sync-api] /standings/br GET error:", error.message);
     res.status(500).json({ success: false, code: "DATABASE_ERROR", message: "Database error" });
   }
 });

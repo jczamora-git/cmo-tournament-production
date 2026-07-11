@@ -29,6 +29,11 @@ const overviewCards = [
     description: "View tournament bracket.",
     to: "/bracket",
   },
+  {
+    title: "Standings",
+    description: "View BR group standings from the Controller.",
+    to: "/standings",
+  },
 ];
 
 function AdminDashboard() {

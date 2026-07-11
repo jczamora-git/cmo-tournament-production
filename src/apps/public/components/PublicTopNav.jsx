@@ -16,6 +16,7 @@ const navItems = [
   { to: "/schedule", label: "Schedule" },
   { to: "/history", label: "History" },
   { to: "/bracket", label: "Bracket" },
+  { to: "/standings", label: "Standings" },
   { to: "/live", label: "Watch Live" },
 ];
 

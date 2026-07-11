@@ -20,6 +20,7 @@ const publicUploadsRoutes = require("./routes/public.uploads.routes");
 const publicSettingsRoutes = require("./routes/public.settings.routes");
 const adminSettingsRoutes = require("./routes/admin.settings.routes");
 const syncRoutes = require("./routes/sync.routes");
+const standingsRoutes = require("./routes/standings.routes");
 
 function buildCorsOptions() {
   const allowedOrigins = [
@@ -107,6 +108,9 @@ function createApp({ restrictedCors = false } = {}) {
 
   // Sync protected routes
   app.use("/api/sync", syncRoutes);
+
+  // Public BR Group Standings read (Controller push: POST /api/sync/standings/br)
+  app.use("/api/standings", standingsRoutes);
 
   app.use((error, req, res, next) => {
     if (error.code === "LIMIT_FILE_SIZE") {

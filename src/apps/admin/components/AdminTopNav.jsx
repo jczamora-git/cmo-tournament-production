@@ -8,6 +8,7 @@ const navItems = [
   { to: "/matches", label: "Matches" },
   { to: "/history", label: "History" },
   { to: "/bracket", label: "Bracket" },
+  { to: "/standings", label: "Standings" },
   { to: "/videos", label: "Videos" },
   { to: "/live-settings", label: "Live" },
   { to: "/registration-settings", label: "Registration" },

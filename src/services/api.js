@@ -80,6 +80,9 @@ export const getTournamentModes = (tournamentId) => request(`/tournaments/${tour
 export const getVideos = () => request("/videos");
 export const getTournamentVideos = (slug) => request(`/tournaments/${slug}/videos`);
 
+// BR Group Standings (public read — Controller push is POST /api/sync/standings/br)
+export const getBrGroupStandings = (params) => request(`/standings/br-group${qs(params)}`);
+
 // Public team submission
 export const submitTeam = (payload) =>
   request("/team-submissions", { method: "POST", body: payload });
