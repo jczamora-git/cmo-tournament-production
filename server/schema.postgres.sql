@@ -60,6 +60,7 @@ CREATE TABLE IF NOT EXISTS matches (
   series_completed_at TIMESTAMP DEFAULT NULL,
   tournament_id INTEGER DEFAULT NULL REFERENCES tournaments(id) ON DELETE SET NULL,
   tournament_mode_id INTEGER DEFAULT NULL REFERENCES tournament_modes(id) ON DELETE SET NULL,
+  public_match_id INTEGER UNIQUE,
   created_at TIMESTAMP DEFAULT NOW(),
   updated_at TIMESTAMP DEFAULT NOW()
 );
@@ -82,6 +83,7 @@ CREATE TABLE IF NOT EXISTS games (
   winner_team_id BIGINT DEFAULT NULL REFERENCES teams(id) ON DELETE SET NULL,
   status VARCHAR(50) DEFAULT 'queued',
   finished_at TIMESTAMP DEFAULT NULL,
+  public_game_id INTEGER UNIQUE,
   created_at TIMESTAMP DEFAULT NOW(),
   updated_at TIMESTAMP DEFAULT NOW(),
   UNIQUE(match_id, game_no)
@@ -143,4 +145,48 @@ CREATE TABLE IF NOT EXISTS br_group_standings (
   eliminated_at TIMESTAMP NULL,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT unique_br_standing UNIQUE (tournament_id, tournament_mode_id, group_name, team_id)
+);
+
+CREATE TABLE IF NOT EXISTS brackets (
+  id SERIAL PRIMARY KEY,
+  public_bracket_id INTEGER UNIQUE,
+  tournament_id INTEGER NOT NULL,
+  tournament_mode_id INTEGER NOT NULL,
+  name VARCHAR(255) DEFAULT 'Bracket',
+  bracket_type VARCHAR(50) DEFAULT 'single_elimination',
+  status VARCHAR(50) DEFAULT 'active',
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS bracket_rounds (
+  id SERIAL PRIMARY KEY,
+  public_round_id INTEGER UNIQUE,
+  bracket_id INTEGER NOT NULL REFERENCES brackets(id) ON DELETE CASCADE,
+  public_bracket_id INTEGER,
+  name VARCHAR(255),
+  round_number INTEGER DEFAULT 1,
+  sort_order INTEGER DEFAULT 0,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS bracket_nodes (
+  id SERIAL PRIMARY KEY,
+  public_node_id INTEGER UNIQUE,
+  bracket_id INTEGER NOT NULL REFERENCES brackets(id) ON DELETE CASCADE,
+  round_id INTEGER REFERENCES bracket_rounds(id) ON DELETE SET NULL,
+  public_bracket_id INTEGER,
+  public_round_id INTEGER,
+  public_match_id INTEGER,
+  match_id INTEGER,
+  position INTEGER DEFAULT 0,
+  blue_team_id INTEGER,
+  red_team_id INTEGER,
+  winner_team_id INTEGER,
+  next_public_node_id INTEGER,
+  next_node_id INTEGER,
+  status VARCHAR(50) DEFAULT 'pending',
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );

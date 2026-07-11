@@ -158,17 +158,14 @@ function ViewStandings() {
           <p className="brs-page-subtitle">
             {selectedTournament?.name
               ? `${selectedTournament.name}${selectedMode?.name ? ` · ${selectedMode.name}` : ""}`
-              : "Battle Royale group points after each controller sync."}
+              : "Official Battle Royale group standings."}
           </p>
         </div>
 
         {updatedLabel ? (
-          <div className="brs-updated-chip" title="Synced from tournament controller">
+          <div className="brs-updated-chip brs-updated-chip--public" title={`Last updated ${updatedLabel}`}>
             <Clock3 size={15} strokeWidth={2} aria-hidden />
-            <div className="brs-updated-chip-text">
-              <span className="brs-updated-chip-label">Data from Controller</span>
-              <span>Updated {updatedLabel}</span>
-            </div>
+            <span>Updated {updatedLabel}</span>
           </div>
         ) : null}
       </header>
@@ -227,7 +224,7 @@ function ViewStandings() {
         <EmptyState
           icon={<Trophy size={48} strokeWidth={1.5} color="currentColor" />}
           title="No standings data available yet"
-          description="Standings will appear here after the controller pushes BR group results."
+          description="Group standings will appear here once results are available."
         />
       ) : (
         <BrStandingsTables groups={groups} detailed={false} variant="public" />

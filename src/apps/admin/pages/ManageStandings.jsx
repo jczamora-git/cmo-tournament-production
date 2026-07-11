@@ -214,6 +214,9 @@ function ManageStandings() {
       </div>
 
       <div className="standings-meta-row">
+        <span className="standings-meta-pill standings-meta-pill--source">
+          Data synced from Controller
+        </span>
         {selectedTournament?.name ? (
           <span className="standings-meta-pill">{selectedTournament.name}</span>
         ) : null}
@@ -235,7 +238,7 @@ function ManageStandings() {
       </div>
 
       <p style={{ color: "var(--jz-text-muted)", fontSize: 13, marginTop: 0 }}>
-        Note: Standings are <strong>pushed</strong> from the Controller (
+        Admin note: Standings are <strong>pushed</strong> from the Controller (
         <code>POST /api/sync/standings/br</code>). Refresh reloads the latest saved
         data on production — it does not pull from the Controller.
       </p>

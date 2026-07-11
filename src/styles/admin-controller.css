@@ -2391,6 +2391,23 @@
   font-weight: 600;
 }
 
+.standings-meta-pill--source {
+  border-color: rgba(220, 38, 38, 0.35);
+  background: rgba(220, 38, 38, 0.12);
+  color: #fecaca;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+}
+
+.brs-updated-chip--public {
+  border-radius: 999px;
+  border-color: rgba(148, 163, 184, 0.22);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--jz-text-muted);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
 .standings-filter-bar {
   display: flex;
   flex-wrap: wrap;

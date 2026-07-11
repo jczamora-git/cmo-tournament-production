@@ -1,10 +1,27 @@
 const express = require("express");
 const db = require("../db");
 const requireSyncToken = require("../middleware/requireSyncToken");
+const { ensureSyncSchema } = require("../services/ensureSyncSchema");
 
 const router = express.Router();
 
 router.use(requireSyncToken);
+
+// Controller game lifecycle statuses (+ legacy values for compatibility)
+const GAME_STATUSES = ["setup", "drafting", "live", "finished", "cancelled", "queued", "active"];
+const MATCH_STATUSES = [
+  "queued",
+  "active",
+  "live",
+  "finished",
+  "cancelled",
+  "setup",
+  "drafting",
+  "upcoming",
+  "scheduled",
+  "done",
+  "completed",
+];
 
 function parsePositiveInt(val) {
   const num = Number(val);
@@ -23,6 +40,35 @@ function toBool(val) {
     return false;
   }
   return Boolean(val);
+}
+
+function normalizeStatus(status) {
+  if (status === undefined || status === null || status === "") return null;
+  return String(status).trim().toLowerCase();
+}
+
+function emptySyncStats(received = 0) {
+  return {
+    success: true,
+    received,
+    created: 0,
+    updated: 0,
+    failed: 0,
+    errors: [],
+  };
+}
+
+function getInsertId(result, meta) {
+  return (meta && meta.insertId) || (result && result[0] && result[0].id) || null;
+}
+
+async function findMatchIdByPublicId(connection, publicMatchId) {
+  if (!publicMatchId) return null;
+  const [rows] = await connection.query(
+    `SELECT id FROM matches WHERE public_match_id = ? LIMIT 1`,
+    [publicMatchId]
+  );
+  return rows[0]?.id || null;
 }
 
 function buildBrStandingsUpsertSql() {
@@ -209,6 +255,7 @@ router.get("/players", async (req, res) => {
 });
 
 // 9. POST /api/sync/matches
+// Accepts public_match_id for idempotent upsert from Controller.
 router.post("/matches", async (req, res) => {
   const {
     tournament_id,
@@ -224,22 +271,49 @@ router.post("/matches", async (req, res) => {
     series_completed,
     series_winner_team_id,
     series_completed_at,
-    queue_order
-  } = req.body;
+    queue_order,
+    public_match_id,
+    match_public_id,
+  } = req.body || {};
 
+  const stats = emptySyncStats(1);
   const tId = parsePositiveInt(tournament_id);
   const mId = parsePositiveInt(tournament_mode_id);
+  const publicMatchId = parsePositiveInt(public_match_id || match_public_id);
 
   if (!tId || !mId) {
-    return res.status(400).json({ success: false, code: "VALIDATION_ERROR", message: "Valid tournament_id and tournament_mode_id are required" });
+    return res.status(400).json({
+      success: false,
+      code: "VALIDATION_ERROR",
+      message: "Valid tournament_id and tournament_mode_id are required",
+      received: 1,
+      created: 0,
+      updated: 0,
+      failed: 1,
+      errors: [{ message: "Valid tournament_id and tournament_mode_id are required" }],
+    });
   }
 
   const connection = await db.getConnection();
   try {
-    const [modeRows] = await connection.query(`SELECT competition_type FROM tournament_modes WHERE id = ? AND tournament_id = ?`, [mId, tId]);
+    await ensureSyncSchema(connection);
+
+    const [modeRows] = await connection.query(
+      `SELECT competition_type FROM tournament_modes WHERE id = ? AND tournament_id = ?`,
+      [mId, tId]
+    );
     if (modeRows.length === 0) {
       connection.release();
-      return res.status(400).json({ success: false, code: "CONTEXT_MISMATCH", message: "Tournament mode does not match tournament" });
+      return res.status(400).json({
+        success: false,
+        code: "CONTEXT_MISMATCH",
+        message: "Tournament mode does not match tournament",
+        received: 1,
+        created: 0,
+        updated: 0,
+        failed: 1,
+        errors: [{ message: "Tournament mode does not match tournament" }],
+      });
     }
     const compType = modeRows[0].competition_type;
 
@@ -249,22 +323,61 @@ router.post("/matches", async (req, res) => {
     if (compType === "head_to_head") {
       if (!bId || !rId) {
         connection.release();
-        return res.status(400).json({ success: false, code: "VALIDATION_ERROR", message: "Both blue_team_id and red_team_id are required for head_to_head" });
+        return res.status(400).json({
+          success: false,
+          code: "VALIDATION_ERROR",
+          message: "Both blue_team_id and red_team_id are required for head_to_head",
+          received: 1,
+          created: 0,
+          updated: 0,
+          failed: 1,
+          errors: [{ message: "Both blue_team_id and red_team_id are required for head_to_head" }],
+        });
       }
       if (bId === rId) {
         connection.release();
-        return res.status(400).json({ success: false, code: "VALIDATION_ERROR", message: "Teams must be different" });
+        return res.status(400).json({
+          success: false,
+          code: "VALIDATION_ERROR",
+          message: "Teams must be different",
+          received: 1,
+          created: 0,
+          updated: 0,
+          failed: 1,
+          errors: [{ message: "Teams must be different" }],
+        });
       }
-      
-      const [teams] = await connection.query(`SELECT id, tournament_id, tournament_mode_id FROM teams WHERE id IN (?, ?)`, [bId, rId]);
+
+      const [teams] = await connection.query(
+        `SELECT id, tournament_id, tournament_mode_id FROM teams WHERE id IN (?, ?)`,
+        [bId, rId]
+      );
       if (teams.length !== 2) {
         connection.release();
-        return res.status(400).json({ success: false, code: "VALIDATION_ERROR", message: "One or both teams do not exist" });
+        return res.status(400).json({
+          success: false,
+          code: "VALIDATION_ERROR",
+          message: "One or both teams do not exist",
+          received: 1,
+          created: 0,
+          updated: 0,
+          failed: 1,
+          errors: [{ message: "One or both teams do not exist" }],
+        });
       }
       for (const t of teams) {
         if (t.tournament_id !== tId || t.tournament_mode_id !== mId) {
           connection.release();
-          return res.status(400).json({ success: false, code: "VALIDATION_ERROR", message: "Teams do not belong to the requested tournament mode" });
+          return res.status(400).json({
+            success: false,
+            code: "VALIDATION_ERROR",
+            message: "Teams do not belong to the requested tournament mode",
+            received: 1,
+            created: 0,
+            updated: 0,
+            failed: 1,
+            errors: [{ message: "Teams do not belong to the requested tournament mode" }],
+          });
         }
       }
     } else {
@@ -272,227 +385,1008 @@ router.post("/matches", async (req, res) => {
       rId = rId || null;
     }
 
-    const validStatuses = ["queued", "active", "live", "finished", "cancelled"];
-    if (status && !validStatuses.includes(status)) {
+    const normalizedStatus = normalizeStatus(status) || "queued";
+    if (!MATCH_STATUSES.includes(normalizedStatus)) {
       connection.release();
-      return res.status(400).json({ success: false, code: "VALIDATION_ERROR", message: "Invalid status" });
+      return res.status(400).json({
+        success: false,
+        code: "VALIDATION_ERROR",
+        message: "Invalid status",
+        received: 1,
+        created: 0,
+        updated: 0,
+        failed: 1,
+        errors: [{ message: `Invalid status: ${status}` }],
+      });
     }
 
-    await connection.beginTransaction();
-    const insertSql = `
-      INSERT INTO matches (match_no, blue_team_id, red_team_id, mode, title, queue_order, blue_score, red_score, status, series_completed, series_winner_team_id, series_completed_at, tournament_id, tournament_mode_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `;
-    const params = [
-      parsePositiveInt(match_no) || 1,
-      bId,
-      rId,
-      mode || "BO3",
-      title || "Match",
-      parsePositiveInt(queue_order) || 1,
-      parsePositiveInt(blue_score) || 0,
-      parsePositiveInt(red_score) || 0,
-      status || "queued",
-      series_completed === true ? 1 : 0,
-      parsePositiveInt(series_winner_team_id) || null,
-      series_completed_at || null,
-      tId,
-      mId
-    ];
+    const matchFields = {
+      match_no: parsePositiveInt(match_no) || 1,
+      blue_team_id: bId,
+      red_team_id: rId,
+      mode: mode || "BO3",
+      title: title || "Match",
+      queue_order: parsePositiveInt(queue_order) || 1,
+      blue_score: parseNonNegInt(blue_score, 0) ?? 0,
+      red_score: parseNonNegInt(red_score, 0) ?? 0,
+      status: normalizedStatus,
+      series_completed: series_completed === true || series_completed === 1 ? 1 : 0,
+      series_winner_team_id: parsePositiveInt(series_winner_team_id) || null,
+      series_completed_at: series_completed_at || null,
+      tournament_id: tId,
+      tournament_mode_id: mId,
+      public_match_id: publicMatchId,
+    };
 
-    // NOTE: pg node module supports RETURNING id natively in the query wrapper if we use Postgres, but the wrapper automatically handles insertId.
-    const [result, meta] = await connection.query(insertSql, params);
-    const newId = meta.insertId || (result[0] && result[0].id);
+    await connection.beginTransaction();
+
+    let existingId = null;
+    if (publicMatchId) {
+      existingId = await findMatchIdByPublicId(connection, publicMatchId);
+    }
+
+    let matchId;
+    if (existingId) {
+      await connection.query(
+        `UPDATE matches SET
+          match_no = ?, blue_team_id = ?, red_team_id = ?, mode = ?, title = ?,
+          queue_order = ?, blue_score = ?, red_score = ?, status = ?,
+          series_completed = ?, series_winner_team_id = ?, series_completed_at = ?,
+          tournament_id = ?, tournament_mode_id = ?, public_match_id = ?, updated_at = NOW()
+         WHERE id = ?`,
+        [
+          matchFields.match_no,
+          matchFields.blue_team_id,
+          matchFields.red_team_id,
+          matchFields.mode,
+          matchFields.title,
+          matchFields.queue_order,
+          matchFields.blue_score,
+          matchFields.red_score,
+          matchFields.status,
+          matchFields.series_completed,
+          matchFields.series_winner_team_id,
+          matchFields.series_completed_at,
+          matchFields.tournament_id,
+          matchFields.tournament_mode_id,
+          matchFields.public_match_id,
+          existingId,
+        ]
+      );
+      matchId = existingId;
+      stats.updated = 1;
+    } else {
+      const insertSql = `
+        INSERT INTO matches (
+          match_no, blue_team_id, red_team_id, mode, title, queue_order,
+          blue_score, red_score, status, series_completed, series_winner_team_id,
+          series_completed_at, tournament_id, tournament_mode_id, public_match_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `;
+      const [result, meta] = await connection.query(insertSql, [
+        matchFields.match_no,
+        matchFields.blue_team_id,
+        matchFields.red_team_id,
+        matchFields.mode,
+        matchFields.title,
+        matchFields.queue_order,
+        matchFields.blue_score,
+        matchFields.red_score,
+        matchFields.status,
+        matchFields.series_completed,
+        matchFields.series_winner_team_id,
+        matchFields.series_completed_at,
+        matchFields.tournament_id,
+        matchFields.tournament_mode_id,
+        matchFields.public_match_id,
+      ]);
+      matchId = getInsertId(result, meta);
+      stats.created = 1;
+    }
 
     await connection.commit();
     connection.release();
 
-    console.log(`[sync-api] match created id=${newId} tournament=${tId} mode=${mId}`);
-    res.json({ success: true, id: newId, data: { id: newId } });
+    console.log(
+      `[sync-api] match ${stats.updated ? "updated" : "created"} id=${matchId} public_match_id=${publicMatchId || "n/a"} tournament=${tId} mode=${mId}`
+    );
+    res.json({
+      ...stats,
+      id: matchId,
+      public_match_id: publicMatchId || null,
+      data: { id: matchId, public_match_id: publicMatchId || null },
+    });
   } catch (error) {
-    if (connection) {
+    try {
       await connection.rollback();
+    } catch (_) {
+      /* ignore */
+    }
+    try {
       connection.release();
+    } catch (_) {
+      /* ignore */
     }
     console.error("[sync-api] /matches POST error:", error.message);
-    res.status(500).json({ success: false, code: "DATABASE_ERROR", message: "Database error" });
+    res.status(500).json({
+      success: false,
+      code: "DATABASE_ERROR",
+      message: "Database error",
+      received: 1,
+      created: 0,
+      updated: 0,
+      failed: 1,
+      errors: [{ message: error.message }],
+    });
   }
 });
 
 // 10. PUT /api/sync/matches/:id
 router.put("/matches/:id", async (req, res) => {
   const matchId = parsePositiveInt(req.params.id);
-  if (!matchId) return res.status(400).json({ success: false, code: "VALIDATION_ERROR", message: "Invalid match ID" });
+  if (!matchId) {
+    return res.status(400).json({
+      success: false,
+      code: "VALIDATION_ERROR",
+      message: "Invalid match ID",
+      received: 1,
+      created: 0,
+      updated: 0,
+      failed: 1,
+      errors: [{ message: "Invalid match ID" }],
+    });
+  }
 
-  const body = req.body;
+  const body = req.body || {};
   const updates = [];
   const params = [];
 
+  if (body.status !== undefined) {
+    const normalizedStatus = normalizeStatus(body.status);
+    if (!normalizedStatus || !MATCH_STATUSES.includes(normalizedStatus)) {
+      return res.status(400).json({
+        success: false,
+        code: "VALIDATION_ERROR",
+        message: "Invalid status",
+        received: 1,
+        created: 0,
+        updated: 0,
+        failed: 1,
+        errors: [{ message: `Invalid status: ${body.status}` }],
+      });
+    }
+    updates.push("status = ?");
+    params.push(normalizedStatus);
+  }
+
   const allowList = [
-    "match_no", "blue_team_id", "red_team_id", "mode", "title",
-    "queue_order", "blue_score", "red_score", "status",
-    "series_completed", "series_winner_team_id", "series_completed_at",
-    "tournament_id", "tournament_mode_id"
+    "match_no",
+    "blue_team_id",
+    "red_team_id",
+    "mode",
+    "title",
+    "queue_order",
+    "blue_score",
+    "red_score",
+    "series_completed",
+    "series_winner_team_id",
+    "series_completed_at",
+    "tournament_id",
+    "tournament_mode_id",
   ];
 
   for (const field of allowList) {
     if (body[field] !== undefined) {
       updates.push(`${field} = ?`);
-      params.push(body[field] === null ? null : (field.includes("id") || field.includes("no") || field.includes("score") || field.includes("order") ? parsePositiveInt(body[field]) || (body[field] === 0 ? 0 : null) : body[field]));
+      if (field === "title" || field === "mode" || field === "series_completed_at") {
+        params.push(body[field]);
+      } else if (field === "series_completed") {
+        params.push(body[field] === true || body[field] === 1 ? 1 : 0);
+      } else {
+        params.push(
+          body[field] === null
+            ? null
+            : parsePositiveInt(body[field]) || (body[field] === 0 ? 0 : null)
+        );
+      }
     }
+  }
+
+  const publicMatchId = parsePositiveInt(body.public_match_id || body.match_public_id);
+  if (body.public_match_id !== undefined || body.match_public_id !== undefined) {
+    updates.push("public_match_id = ?");
+    params.push(publicMatchId);
   }
 
   if (updates.length === 0) {
-    return res.json({ success: true, id: matchId, data: { id: matchId } });
+    return res.json({
+      success: true,
+      received: 1,
+      created: 0,
+      updated: 0,
+      failed: 0,
+      errors: [],
+      id: matchId,
+      data: { id: matchId },
+    });
   }
 
-  updates.push(`updated_at = NOW()`);
+  updates.push("updated_at = NOW()");
   params.push(matchId);
 
-  const sql = `UPDATE matches SET ${updates.join(", ")} WHERE id = ?`;
-
   try {
-    const [result, meta] = await db.query(sql, params);
+    await ensureSyncSchema();
+    const [, meta] = await db.query(`UPDATE matches SET ${updates.join(", ")} WHERE id = ?`, params);
     if (meta.affectedRows === 0) {
-      return res.status(404).json({ success: false, code: "NOT_FOUND", message: "Match not found" });
+      return res.status(404).json({
+        success: false,
+        code: "NOT_FOUND",
+        message: "Match not found",
+        received: 1,
+        created: 0,
+        updated: 0,
+        failed: 1,
+        errors: [{ message: "Match not found" }],
+      });
     }
     console.log(`[sync-api] match updated id=${matchId}`);
-    res.json({ success: true, id: matchId, data: { id: matchId } });
+    res.json({
+      success: true,
+      received: 1,
+      created: 0,
+      updated: 1,
+      failed: 0,
+      errors: [],
+      id: matchId,
+      data: { id: matchId },
+    });
   } catch (error) {
     console.error("[sync-api] /matches/:id PUT error:", error.message);
-    res.status(500).json({ success: false, code: "DATABASE_ERROR", message: "Database error" });
+    res.status(500).json({
+      success: false,
+      code: "DATABASE_ERROR",
+      message: "Database error",
+      received: 1,
+      created: 0,
+      updated: 0,
+      failed: 1,
+      errors: [{ message: error.message }],
+    });
   }
 });
 
 // 11. POST /api/sync/games
+// Resolves match via match_id OR match_public_id/public_match_id.
+// Accepts controller statuses: setup, drafting, live, finished, cancelled.
 router.post("/games", async (req, res) => {
-  const { match_id, game_no, winner_team_id, status, finished_at } = req.body;
+  const {
+    match_id,
+    match_public_id,
+    public_match_id,
+    game_no,
+    winner_team_id,
+    status,
+    finished_at,
+    public_game_id,
+    game_public_id,
+  } = req.body || {};
 
-  const mId = parsePositiveInt(match_id);
+  const publicMatchId = parsePositiveInt(match_public_id || public_match_id);
+  let localMatchId = parsePositiveInt(match_id);
   const gNo = parsePositiveInt(game_no);
+  const publicGameId = parsePositiveInt(public_game_id || game_public_id);
+  const normalizedStatus = normalizeStatus(status) || "setup";
 
-  if (!mId || !gNo) {
-    return res.status(400).json({ success: false, code: "VALIDATION_ERROR", message: "Valid match_id and game_no are required" });
+  if ((!localMatchId && !publicMatchId) || !gNo) {
+    return res.status(400).json({
+      success: false,
+      code: "VALIDATION_ERROR",
+      message: "Valid match_id (or match_public_id) and game_no are required",
+      received: 1,
+      created: 0,
+      updated: 0,
+      failed: 1,
+      errors: [{ message: "Valid match_id (or match_public_id) and game_no are required" }],
+    });
   }
 
-  const validStatuses = ["queued", "active", "live", "finished", "cancelled"];
-  if (status && !validStatuses.includes(status)) {
-    return res.status(400).json({ success: false, code: "VALIDATION_ERROR", message: "Invalid status" });
+  if (!GAME_STATUSES.includes(normalizedStatus)) {
+    return res.status(400).json({
+      success: false,
+      code: "VALIDATION_ERROR",
+      message: "Invalid status",
+      received: 1,
+      created: 0,
+      updated: 0,
+      failed: 1,
+      errors: [{
+        message: `Invalid status: ${status}. Allowed: ${GAME_STATUSES.join(", ")}`,
+      }],
+    });
   }
 
   const connection = await db.getConnection();
   try {
-    const [matchRows] = await connection.query(`SELECT id, blue_team_id, red_team_id FROM matches WHERE id = ?`, [mId]);
+    await ensureSyncSchema(connection);
+
+    if (!localMatchId && publicMatchId) {
+      localMatchId = await findMatchIdByPublicId(connection, publicMatchId);
+      if (!localMatchId) {
+        connection.release();
+        return res.status(404).json({
+          success: false,
+          code: "MATCH_NOT_SYNCED",
+          message: `No production match found for public_match_id ${publicMatchId}. Sync matches first.`,
+          received: 1,
+          created: 0,
+          updated: 0,
+          failed: 1,
+          errors: [{ public_match_id: publicMatchId, message: "Match not found by public_match_id" }],
+        });
+      }
+    }
+
+    const [matchRows] = await connection.query(
+      `SELECT id, blue_team_id, red_team_id, public_match_id FROM matches WHERE id = ?`,
+      [localMatchId]
+    );
     if (matchRows.length === 0) {
       connection.release();
-      return res.status(404).json({ success: false, code: "NOT_FOUND", message: "Match not found" });
+      return res.status(404).json({
+        success: false,
+        code: "NOT_FOUND",
+        message: "Match not found",
+        received: 1,
+        created: 0,
+        updated: 0,
+        failed: 1,
+        errors: [{ match_id: localMatchId, message: "Match not found" }],
+      });
     }
     const match = matchRows[0];
 
+    // Optional: if caller also sent public_match_id, ensure it matches the row
+    if (publicMatchId && match.public_match_id && Number(match.public_match_id) !== publicMatchId) {
+      connection.release();
+      return res.status(400).json({
+        success: false,
+        code: "CONTEXT_MISMATCH",
+        message: "match_id does not match the given public_match_id",
+        received: 1,
+        created: 0,
+        updated: 0,
+        failed: 1,
+        errors: [{ message: "match_id does not match the given public_match_id" }],
+      });
+    }
+
     const wId = parsePositiveInt(winner_team_id);
     if (wId) {
-      // For head-to-head, winner must be one of the teams
       if (match.blue_team_id && match.red_team_id) {
         if (wId !== match.blue_team_id && wId !== match.red_team_id) {
           connection.release();
-          return res.status(400).json({ success: false, code: "VALIDATION_ERROR", message: "Winner must be one of the match teams" });
+          return res.status(400).json({
+            success: false,
+            code: "VALIDATION_ERROR",
+            message: "Winner must be one of the match teams",
+            received: 1,
+            created: 0,
+            updated: 0,
+            failed: 1,
+            errors: [{ message: "Winner must be one of the match teams" }],
+          });
         }
       } else {
-        // Just verify team exists
         const [teamRows] = await connection.query(`SELECT id FROM teams WHERE id = ?`, [wId]);
         if (teamRows.length === 0) {
           connection.release();
-          return res.status(400).json({ success: false, code: "VALIDATION_ERROR", message: "Winner team does not exist" });
+          return res.status(400).json({
+            success: false,
+            code: "VALIDATION_ERROR",
+            message: "Winner team does not exist",
+            received: 1,
+            created: 0,
+            updated: 0,
+            failed: 1,
+            errors: [{ message: "Winner team does not exist" }],
+          });
         }
       }
     }
 
     await connection.beginTransaction();
-    const insertSql = `
-      INSERT INTO games (match_id, game_no, winner_team_id, status, finished_at)
-      VALUES (?, ?, ?, ?, ?)
-    `;
-    const params = [
-      mId,
-      gNo,
-      wId || null,
-      status || "queued",
-      finished_at || null
-    ];
 
-    let result, meta;
-    try {
-      [result, meta] = await connection.query(insertSql, params);
-    } catch (dbErr) {
-      if (dbErr.code === 'ER_DUP_ENTRY' || dbErr.message.includes('unique constraint') || dbErr.message.includes('Duplicate entry')) {
-        await connection.rollback();
-        connection.release();
-        return res.status(409).json({ success: false, code: "DUPLICATE_GAME", message: "Game already exists for this match and number" });
-      }
-      throw dbErr;
+    // Prefer existing row by public_game_id, else by (match_id, game_no)
+    let existingId = null;
+    if (publicGameId) {
+      const [byPublic] = await connection.query(
+        `SELECT id FROM games WHERE public_game_id = ? LIMIT 1`,
+        [publicGameId]
+      );
+      if (byPublic[0]) existingId = byPublic[0].id;
+    }
+    if (!existingId) {
+      const [byPair] = await connection.query(
+        `SELECT id FROM games WHERE match_id = ? AND game_no = ? LIMIT 1`,
+        [localMatchId, gNo]
+      );
+      if (byPair[0]) existingId = byPair[0].id;
     }
 
-    const newId = meta.insertId || (result[0] && result[0].id);
+    let gameId;
+    let created = 0;
+    let updated = 0;
+
+    if (existingId) {
+      await connection.query(
+        `UPDATE games SET
+          match_id = ?, game_no = ?, winner_team_id = ?, status = ?,
+          finished_at = ?, public_game_id = COALESCE(?, public_game_id), updated_at = NOW()
+         WHERE id = ?`,
+        [localMatchId, gNo, wId || null, normalizedStatus, finished_at || null, publicGameId, existingId]
+      );
+      gameId = existingId;
+      updated = 1;
+    } else {
+      const insertSql = `
+        INSERT INTO games (match_id, game_no, winner_team_id, status, finished_at, public_game_id)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `;
+      const [result, meta] = await connection.query(insertSql, [
+        localMatchId,
+        gNo,
+        wId || null,
+        normalizedStatus,
+        finished_at || null,
+        publicGameId,
+      ]);
+      gameId = getInsertId(result, meta);
+      created = 1;
+    }
+
     await connection.commit();
     connection.release();
 
-    console.log(`[sync-api] game created id=${newId} match=${mId} no=${gNo}`);
-    res.json({ success: true, id: newId, data: { id: newId } });
+    console.log(
+      `[sync-api] game ${updated ? "updated" : "created"} id=${gameId} match=${localMatchId} no=${gNo} status=${normalizedStatus}`
+    );
+    res.json({
+      success: true,
+      received: 1,
+      created,
+      updated,
+      failed: 0,
+      errors: [],
+      id: gameId,
+      match_id: localMatchId,
+      public_match_id: publicMatchId || match.public_match_id || null,
+      data: { id: gameId, match_id: localMatchId },
+    });
   } catch (error) {
-    if (connection) {
+    try {
       await connection.rollback();
+    } catch (_) {
+      /* ignore */
+    }
+    try {
       connection.release();
+    } catch (_) {
+      /* ignore */
     }
     console.error("[sync-api] /games POST error:", error.message);
-    res.status(500).json({ success: false, code: "DATABASE_ERROR", message: "Database error" });
+    res.status(500).json({
+      success: false,
+      code: "DATABASE_ERROR",
+      message: "Database error",
+      received: 1,
+      created: 0,
+      updated: 0,
+      failed: 1,
+      errors: [{ message: error.message }],
+    });
   }
 });
 
 // 12. PUT /api/sync/games/:id
 router.put("/games/:id", async (req, res) => {
   const gameId = parsePositiveInt(req.params.id);
-  if (!gameId) return res.status(400).json({ success: false, code: "VALIDATION_ERROR", message: "Invalid game ID" });
+  if (!gameId) {
+    return res.status(400).json({
+      success: false,
+      code: "VALIDATION_ERROR",
+      message: "Invalid game ID",
+      received: 1,
+      created: 0,
+      updated: 0,
+      failed: 1,
+      errors: [{ message: "Invalid game ID" }],
+    });
+  }
 
-  const body = req.body;
+  const body = req.body || {};
   const updates = [];
   const params = [];
 
-  // Match ID should generally not be changed, but allowList can support it if needed
-  const allowList = ["game_no", "winner_team_id", "status", "finished_at"];
-
-  for (const field of allowList) {
-    if (body[field] !== undefined) {
-      updates.push(`${field} = ?`);
-      if (field === "winner_team_id" || field === "game_no") {
-        params.push(parsePositiveInt(body[field]) || null);
-      } else {
-        params.push(body[field]);
-      }
+  if (body.status !== undefined) {
+    const normalizedStatus = normalizeStatus(body.status);
+    if (!normalizedStatus || !GAME_STATUSES.includes(normalizedStatus)) {
+      return res.status(400).json({
+        success: false,
+        code: "VALIDATION_ERROR",
+        message: "Invalid status",
+        received: 1,
+        created: 0,
+        updated: 0,
+        failed: 1,
+        errors: [{ message: `Invalid status: ${body.status}. Allowed: ${GAME_STATUSES.join(", ")}` }],
+      });
     }
+    updates.push("status = ?");
+    params.push(normalizedStatus);
+  }
+
+  if (body.game_no !== undefined) {
+    updates.push("game_no = ?");
+    params.push(parsePositiveInt(body.game_no) || null);
+  }
+  if (body.winner_team_id !== undefined) {
+    updates.push("winner_team_id = ?");
+    params.push(parsePositiveInt(body.winner_team_id) || null);
+  }
+  if (body.finished_at !== undefined) {
+    updates.push("finished_at = ?");
+    params.push(body.finished_at);
+  }
+  if (body.public_game_id !== undefined || body.game_public_id !== undefined) {
+    updates.push("public_game_id = ?");
+    params.push(parsePositiveInt(body.public_game_id || body.game_public_id) || null);
   }
 
   if (updates.length === 0) {
-    return res.json({ success: true, id: gameId, data: { id: gameId } });
+    return res.json({
+      success: true,
+      received: 1,
+      created: 0,
+      updated: 0,
+      failed: 0,
+      errors: [],
+      id: gameId,
+      data: { id: gameId },
+    });
   }
 
-  updates.push(`updated_at = NOW()`);
+  updates.push("updated_at = NOW()");
   params.push(gameId);
 
-  const sql = `UPDATE games SET ${updates.join(", ")} WHERE id = ?`;
-
   try {
-    const [result, meta] = await db.query(sql, params);
+    await ensureSyncSchema();
+    const [, meta] = await db.query(`UPDATE games SET ${updates.join(", ")} WHERE id = ?`, params);
     if (meta.affectedRows === 0) {
-      return res.status(404).json({ success: false, code: "NOT_FOUND", message: "Game not found" });
+      return res.status(404).json({
+        success: false,
+        code: "NOT_FOUND",
+        message: "Game not found",
+        received: 1,
+        created: 0,
+        updated: 0,
+        failed: 1,
+        errors: [{ message: "Game not found" }],
+      });
     }
     console.log(`[sync-api] game updated id=${gameId}`);
-    res.json({ success: true, id: gameId, data: { id: gameId } });
+    res.json({
+      success: true,
+      received: 1,
+      created: 0,
+      updated: 1,
+      failed: 0,
+      errors: [],
+      id: gameId,
+      data: { id: gameId },
+    });
   } catch (error) {
-    if (error.code === 'ER_DUP_ENTRY' || error.message.includes('unique constraint') || error.message.includes('Duplicate entry')) {
-      return res.status(409).json({ success: false, code: "DUPLICATE_GAME", message: "Game already exists for this match and number" });
+    if (
+      error.code === "ER_DUP_ENTRY" ||
+      (error.message && (error.message.includes("unique constraint") || error.message.includes("Duplicate entry")))
+    ) {
+      return res.status(409).json({
+        success: false,
+        code: "DUPLICATE_GAME",
+        message: "Game already exists for this match and number",
+        received: 1,
+        created: 0,
+        updated: 0,
+        failed: 1,
+        errors: [{ message: "Duplicate game" }],
+      });
     }
     console.error("[sync-api] /games/:id PUT error:", error.message);
-    res.status(500).json({ success: false, code: "DATABASE_ERROR", message: "Database error" });
+    res.status(500).json({
+      success: false,
+      code: "DATABASE_ERROR",
+      message: "Database error",
+      received: 1,
+      created: 0,
+      updated: 0,
+      failed: 1,
+      errors: [{ message: error.message }],
+    });
+  }
+});
+
+// 12b. POST /api/sync/brackets
+// Upserts brackets + rounds + nodes using public_* IDs from Controller.
+router.post("/brackets", async (req, res) => {
+  const body = req.body || {};
+  const tournamentId = parsePositiveInt(body.tournament_id);
+  const tournamentModeId = parsePositiveInt(body.tournament_mode_id);
+
+  const brackets = Array.isArray(body.brackets) ? body.brackets : body.bracket ? [body.bracket] : [];
+  const rounds = Array.isArray(body.bracket_rounds) ? body.bracket_rounds : Array.isArray(body.rounds) ? body.rounds : [];
+  const nodes = Array.isArray(body.bracket_nodes) ? body.bracket_nodes : Array.isArray(body.nodes) ? body.nodes : [];
+
+  const received = brackets.length + rounds.length + nodes.length;
+  const stats = emptySyncStats(received);
+
+  if (!tournamentId || !tournamentModeId) {
+    return res.status(400).json({
+      success: false,
+      code: "VALIDATION_ERROR",
+      message: "Valid tournament_id and tournament_mode_id are required",
+      received,
+      created: 0,
+      updated: 0,
+      failed: received || 1,
+      errors: [{ message: "Valid tournament_id and tournament_mode_id are required" }],
+    });
+  }
+
+  if (received === 0) {
+    return res.status(400).json({
+      success: false,
+      code: "VALIDATION_ERROR",
+      message: "Provide brackets, bracket_rounds, and/or bracket_nodes arrays",
+      received: 0,
+      created: 0,
+      updated: 0,
+      failed: 0,
+      errors: [{ message: "Empty payload" }],
+    });
+  }
+
+  const connection = await db.getConnection();
+  // Maps public IDs → local IDs for linking
+  const bracketIdByPublic = new Map();
+  const roundIdByPublic = new Map();
+  const nodeIdByPublic = new Map();
+
+  try {
+    await ensureSyncSchema(connection);
+
+    const [modeRows] = await connection.query(
+      `SELECT id FROM tournament_modes WHERE id = ? AND tournament_id = ?`,
+      [tournamentModeId, tournamentId]
+    );
+    if (modeRows.length === 0) {
+      connection.release();
+      return res.status(400).json({
+        success: false,
+        code: "CONTEXT_MISMATCH",
+        message: "tournament_mode_id does not belong to tournament_id",
+        received,
+        created: 0,
+        updated: 0,
+        failed: received,
+        errors: [{ message: "tournament_mode_id does not belong to tournament_id" }],
+      });
+    }
+
+    await connection.beginTransaction();
+
+    // 1) Brackets
+    for (const item of brackets) {
+      try {
+        const publicBracketId = parsePositiveInt(item.public_bracket_id || item.id);
+        const name = (item.name && String(item.name).trim()) || "Bracket";
+        const bracketType = item.bracket_type || item.type || "single_elimination";
+        const status = normalizeStatus(item.status) || "active";
+
+        let existingId = null;
+        if (publicBracketId) {
+          const [found] = await connection.query(
+            `SELECT id FROM brackets WHERE public_bracket_id = ? LIMIT 1`,
+            [publicBracketId]
+          );
+          if (found[0]) existingId = found[0].id;
+        }
+
+        if (existingId) {
+          await connection.query(
+            `UPDATE brackets SET
+              tournament_id = ?, tournament_mode_id = ?, name = ?, bracket_type = ?,
+              status = ?, public_bracket_id = ?, updated_at = NOW()
+             WHERE id = ?`,
+            [tournamentId, tournamentModeId, name, bracketType, status, publicBracketId, existingId]
+          );
+          stats.updated += 1;
+          if (publicBracketId) bracketIdByPublic.set(publicBracketId, existingId);
+        } else {
+          const [result, meta] = await connection.query(
+            `INSERT INTO brackets (
+              public_bracket_id, tournament_id, tournament_mode_id, name, bracket_type, status
+            ) VALUES (?, ?, ?, ?, ?, ?)`,
+            [publicBracketId, tournamentId, tournamentModeId, name, bracketType, status]
+          );
+          const newId = getInsertId(result, meta);
+          stats.created += 1;
+          if (publicBracketId) bracketIdByPublic.set(publicBracketId, newId);
+        }
+      } catch (err) {
+        stats.failed += 1;
+        stats.errors.push({
+          entity: "bracket",
+          public_bracket_id: item.public_bracket_id || item.id || null,
+          message: err.message,
+        });
+      }
+    }
+
+    // 2) Rounds
+    for (const item of rounds) {
+      try {
+        const publicRoundId = parsePositiveInt(item.public_round_id || item.id);
+        const publicBracketId = parsePositiveInt(item.public_bracket_id || item.bracket_public_id);
+        let bracketId =
+          parsePositiveInt(item.bracket_id) ||
+          (publicBracketId ? bracketIdByPublic.get(publicBracketId) : null);
+
+        if (!bracketId && publicBracketId) {
+          const [found] = await connection.query(
+            `SELECT id FROM brackets WHERE public_bracket_id = ? LIMIT 1`,
+            [publicBracketId]
+          );
+          if (found[0]) {
+            bracketId = found[0].id;
+            bracketIdByPublic.set(publicBracketId, bracketId);
+          }
+        }
+
+        if (!bracketId) {
+          throw new Error("bracket_id / public_bracket_id not found for round");
+        }
+
+        const name = item.name != null ? String(item.name) : null;
+        const roundNumber = parsePositiveInt(item.round_number || item.round_no) || 1;
+        const sortOrder = parseNonNegInt(item.sort_order, roundNumber) ?? roundNumber;
+
+        let existingId = null;
+        if (publicRoundId) {
+          const [found] = await connection.query(
+            `SELECT id FROM bracket_rounds WHERE public_round_id = ? LIMIT 1`,
+            [publicRoundId]
+          );
+          if (found[0]) existingId = found[0].id;
+        }
+
+        if (existingId) {
+          await connection.query(
+            `UPDATE bracket_rounds SET
+              bracket_id = ?, public_bracket_id = ?, public_round_id = ?,
+              name = ?, round_number = ?, sort_order = ?, updated_at = NOW()
+             WHERE id = ?`,
+            [bracketId, publicBracketId, publicRoundId, name, roundNumber, sortOrder, existingId]
+          );
+          stats.updated += 1;
+          if (publicRoundId) roundIdByPublic.set(publicRoundId, existingId);
+        } else {
+          const [result, meta] = await connection.query(
+            `INSERT INTO bracket_rounds (
+              public_round_id, bracket_id, public_bracket_id, name, round_number, sort_order
+            ) VALUES (?, ?, ?, ?, ?, ?)`,
+            [publicRoundId, bracketId, publicBracketId, name, roundNumber, sortOrder]
+          );
+          const newId = getInsertId(result, meta);
+          stats.created += 1;
+          if (publicRoundId) roundIdByPublic.set(publicRoundId, newId);
+        }
+      } catch (err) {
+        stats.failed += 1;
+        stats.errors.push({
+          entity: "bracket_round",
+          public_round_id: item.public_round_id || item.id || null,
+          message: err.message,
+        });
+      }
+    }
+
+    // 3) Nodes
+    for (const item of nodes) {
+      try {
+        const publicNodeId = parsePositiveInt(item.public_node_id || item.id);
+        const publicBracketId = parsePositiveInt(item.public_bracket_id || item.bracket_public_id);
+        const publicRoundId = parsePositiveInt(item.public_round_id || item.round_public_id);
+        const publicMatchId = parsePositiveInt(item.public_match_id || item.match_public_id);
+        const nextPublicNodeId = parsePositiveInt(item.next_public_node_id || item.next_node_public_id);
+
+        let bracketId =
+          parsePositiveInt(item.bracket_id) ||
+          (publicBracketId ? bracketIdByPublic.get(publicBracketId) : null);
+        if (!bracketId && publicBracketId) {
+          const [found] = await connection.query(
+            `SELECT id FROM brackets WHERE public_bracket_id = ? LIMIT 1`,
+            [publicBracketId]
+          );
+          if (found[0]) {
+            bracketId = found[0].id;
+            bracketIdByPublic.set(publicBracketId, bracketId);
+          }
+        }
+        if (!bracketId) {
+          throw new Error("bracket_id / public_bracket_id not found for node");
+        }
+
+        let roundId =
+          parsePositiveInt(item.round_id) ||
+          (publicRoundId ? roundIdByPublic.get(publicRoundId) : null);
+        if (!roundId && publicRoundId) {
+          const [found] = await connection.query(
+            `SELECT id FROM bracket_rounds WHERE public_round_id = ? LIMIT 1`,
+            [publicRoundId]
+          );
+          if (found[0]) {
+            roundId = found[0].id;
+            roundIdByPublic.set(publicRoundId, roundId);
+          }
+        }
+
+        let matchId = parsePositiveInt(item.match_id) || null;
+        if (!matchId && publicMatchId) {
+          matchId = await findMatchIdByPublicId(connection, publicMatchId);
+        }
+
+        const position = parseNonNegInt(item.position ?? item.slot_index, 0) ?? 0;
+        const blueTeamId = parsePositiveInt(
+          item.blue_team_id || item.slot_a_team_id || item.team_a_id
+        );
+        const redTeamId = parsePositiveInt(
+          item.red_team_id || item.slot_b_team_id || item.team_b_id
+        );
+        const winnerTeamId = parsePositiveInt(item.winner_team_id);
+        const status = normalizeStatus(item.status) || "pending";
+
+        let existingId = null;
+        if (publicNodeId) {
+          const [found] = await connection.query(
+            `SELECT id FROM bracket_nodes WHERE public_node_id = ? LIMIT 1`,
+            [publicNodeId]
+          );
+          if (found[0]) existingId = found[0].id;
+        }
+
+        if (existingId) {
+          await connection.query(
+            `UPDATE bracket_nodes SET
+              bracket_id = ?, round_id = ?, public_bracket_id = ?, public_round_id = ?,
+              public_node_id = ?, public_match_id = ?, match_id = ?, position = ?,
+              blue_team_id = ?, red_team_id = ?, winner_team_id = ?,
+              next_public_node_id = ?, status = ?, updated_at = NOW()
+             WHERE id = ?`,
+            [
+              bracketId,
+              roundId,
+              publicBracketId,
+              publicRoundId,
+              publicNodeId,
+              publicMatchId,
+              matchId,
+              position,
+              blueTeamId,
+              redTeamId,
+              winnerTeamId,
+              nextPublicNodeId,
+              status,
+              existingId,
+            ]
+          );
+          stats.updated += 1;
+          if (publicNodeId) nodeIdByPublic.set(publicNodeId, existingId);
+        } else {
+          const [result, meta] = await connection.query(
+            `INSERT INTO bracket_nodes (
+              public_node_id, bracket_id, round_id, public_bracket_id, public_round_id,
+              public_match_id, match_id, position, blue_team_id, red_team_id,
+              winner_team_id, next_public_node_id, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              publicNodeId,
+              bracketId,
+              roundId,
+              publicBracketId,
+              publicRoundId,
+              publicMatchId,
+              matchId,
+              position,
+              blueTeamId,
+              redTeamId,
+              winnerTeamId,
+              nextPublicNodeId,
+              status,
+            ]
+          );
+          const newId = getInsertId(result, meta);
+          stats.created += 1;
+          if (publicNodeId) nodeIdByPublic.set(publicNodeId, newId);
+        }
+      } catch (err) {
+        stats.failed += 1;
+        stats.errors.push({
+          entity: "bracket_node",
+          public_node_id: item.public_node_id || item.id || null,
+          message: err.message,
+        });
+      }
+    }
+
+    // Resolve next_node_id from next_public_node_id where possible
+    if (nodeIdByPublic.size > 0) {
+      for (const [, localNodeId] of nodeIdByPublic.entries()) {
+        const [rows] = await connection.query(
+          `SELECT next_public_node_id FROM bracket_nodes WHERE id = ?`,
+          [localNodeId]
+        );
+        const nextPublic = rows[0]?.next_public_node_id
+          ? Number(rows[0].next_public_node_id)
+          : null;
+        if (!nextPublic) continue;
+
+        let nextLocal = nodeIdByPublic.get(nextPublic) || null;
+        if (!nextLocal) {
+          const [found] = await connection.query(
+            `SELECT id FROM bracket_nodes WHERE public_node_id = ? LIMIT 1`,
+            [nextPublic]
+          );
+          nextLocal = found[0]?.id || null;
+        }
+
+        if (nextLocal) {
+          await connection.query(
+            `UPDATE bracket_nodes SET next_node_id = ?, updated_at = NOW() WHERE id = ?`,
+            [nextLocal, localNodeId]
+          );
+        }
+      }
+    }
+
+    await connection.commit();
+    connection.release();
+
+    stats.success = stats.failed === 0;
+    console.log(
+      `[sync-api] brackets sync received=${stats.received} created=${stats.created} updated=${stats.updated} failed=${stats.failed}`
+    );
+    res.status(stats.failed && stats.created + stats.updated === 0 ? 400 : 200).json(stats);
+  } catch (error) {
+    try {
+      await connection.rollback();
+    } catch (_) {
+      /* ignore */
+    }
+    try {
+      connection.release();
+    } catch (_) {
+      /* ignore */
+    }
+    console.error("[sync-api] /brackets POST error:", error.message);
+    res.status(500).json({
+      success: false,
+      code: "DATABASE_ERROR",
+      message: "Database error",
+      received,
+      created: 0,
+      updated: 0,
+      failed: received || 1,
+      errors: [{ message: error.message }],
+    });
   }
 });
 
