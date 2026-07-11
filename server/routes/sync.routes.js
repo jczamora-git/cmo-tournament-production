@@ -2735,8 +2735,32 @@ router.post("/brackets", async (req, res) => {
           parseNonNegInt(item.position ?? item.slot_index ?? item.slotIndex ?? item.order, 0) ?? 0;
         // Live PG bracket_nodes is structural only — no status/team columns on some installs.
         // Do NOT write: status, blue_team_id, red_team_id, winner_team_id.
-        const nodeKey = item.node_key || item.nodeKey || null;
-        const label = item.label != null ? String(item.label) : null;
+        // Live PG also enforces node_key NOT NULL — always provide a stable non-empty key.
+        const nodeKeyRaw =
+          item.node_key ??
+          item.nodeKey ??
+          item.key ??
+          item.slot_key ??
+          item.slotKey ??
+          null;
+        let nodeKey =
+          nodeKeyRaw != null && String(nodeKeyRaw).trim()
+            ? String(nodeKeyRaw).trim().slice(0, 64)
+            : null;
+        if (!nodeKey) {
+          // Deterministic fallback for first-time sync without controller node_key
+          const rn = roundNumber || roundId || 0;
+          nodeKey = `b${bracketId}-r${rn}-p${position}${publicNodeId ? `-n${publicNodeId}` : ""}`.slice(
+            0,
+            64
+          );
+        }
+        const label =
+          item.label != null
+            ? String(item.label)
+            : item.name != null
+              ? String(item.name)
+              : nodeKey;
 
         let existingId = null;
         if (publicNodeId) {
@@ -2754,7 +2778,7 @@ router.post("/brackets", async (req, res) => {
             );
             if (foundKey[0]) existingId = foundKey[0].id;
           } catch (_) {
-            /* optional column */
+            /* optional column on some schemas */
           }
         }
         // Position within bracket+round for first-time create
@@ -2775,6 +2799,7 @@ router.post("/brackets", async (req, res) => {
 
         /**
          * Schema-tolerant write: try richest structural column set first, then leaner.
+         * Always include node_key + round_id (NOT NULL on live PG).
          * Never reference status / blue_team_id / red_team_id / winner_team_id.
          */
         async function writeBracketNode({ isUpdate, id }) {
@@ -2783,7 +2808,10 @@ router.post("/brackets", async (req, res) => {
               sql: `UPDATE bracket_nodes SET
                       bracket_id = ?, round_id = ?, public_bracket_id = ?, public_round_id = ?,
                       public_node_id = COALESCE(public_node_id, ?), public_match_id = ?, match_id = ?,
-                      position = ?, next_public_node_id = ?, updated_at = NOW()
+                      position = ?, next_public_node_id = ?,
+                      node_key = COALESCE(node_key, ?),
+                      label = COALESCE(?, label),
+                      updated_at = NOW()
                     WHERE id = ?`,
               params: [
                 bracketId,
@@ -2795,13 +2823,17 @@ router.post("/brackets", async (req, res) => {
                 matchId,
                 position,
                 nextPublicNodeId,
+                nodeKey,
+                label,
                 id,
               ],
             },
             {
               sql: `UPDATE bracket_nodes SET
                       bracket_id = ?, round_id = ?, public_bracket_id = ?, public_round_id = ?,
-                      public_match_id = ?, match_id = ?, position = ?, updated_at = NOW()
+                      public_match_id = ?, match_id = ?, position = ?,
+                      node_key = COALESCE(node_key, ?),
+                      updated_at = NOW()
                     WHERE id = ?`,
               params: [
                 bracketId,
@@ -2811,15 +2843,22 @@ router.post("/brackets", async (req, res) => {
                 publicMatchId,
                 matchId,
                 position,
+                nodeKey,
                 id,
               ],
             },
             {
               sql: `UPDATE bracket_nodes SET
                       bracket_id = ?, round_id = ?, public_bracket_id = ?,
-                      match_id = ?, position = ?
+                      match_id = ?, position = ?, node_key = COALESCE(node_key, ?)
                     WHERE id = ?`,
-              params: [bracketId, roundId, publicBracketId, matchId, position, id],
+              params: [bracketId, roundId, publicBracketId, matchId, position, nodeKey, id],
+            },
+            {
+              sql: `UPDATE bracket_nodes SET
+                      bracket_id = ?, round_id = ?, match_id = ?, node_key = COALESCE(node_key, ?)
+                    WHERE id = ?`,
+              params: [bracketId, roundId, matchId, nodeKey, id],
             },
             {
               sql: `UPDATE bracket_nodes SET bracket_id = ?, round_id = ?, match_id = ? WHERE id = ?`,
@@ -2827,12 +2866,65 @@ router.post("/brackets", async (req, res) => {
             },
           ];
 
+          // Live production requires node_key + round_id NOT NULL.
+          // Prefer minimal inserts that always include node_key first.
           const insertAttempts = [
             {
+              requiresNodeKey: true,
+              sql: `INSERT INTO bracket_nodes (
+                      bracket_id, round_id, node_key, position, match_id,
+                      public_node_id, public_bracket_id, public_round_id, public_match_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              params: [
+                bracketId,
+                roundId,
+                nodeKey,
+                position,
+                matchId,
+                publicNodeId,
+                publicBracketId,
+                publicRoundId,
+                publicMatchId,
+              ],
+            },
+            {
+              requiresNodeKey: true,
+              sql: `INSERT INTO bracket_nodes (
+                      bracket_id, round_id, node_key, position, match_id, public_bracket_id
+                    ) VALUES (?, ?, ?, ?, ?, ?)`,
+              params: [bracketId, roundId, nodeKey, position, matchId, publicBracketId],
+            },
+            {
+              requiresNodeKey: true,
+              sql: `INSERT INTO bracket_nodes (
+                      bracket_id, round_id, node_key, position, match_id
+                    ) VALUES (?, ?, ?, ?, ?)`,
+              params: [bracketId, roundId, nodeKey, position, matchId],
+            },
+            {
+              requiresNodeKey: true,
+              sql: `INSERT INTO bracket_nodes (bracket_id, round_id, node_key, position)
+                    VALUES (?, ?, ?, ?)`,
+              params: [bracketId, roundId, nodeKey, position],
+            },
+            {
+              requiresNodeKey: true,
+              sql: `INSERT INTO bracket_nodes (bracket_id, round_id, node_key, match_id)
+                    VALUES (?, ?, ?, ?)`,
+              params: [bracketId, roundId, nodeKey, matchId],
+            },
+            {
+              requiresNodeKey: true,
+              sql: `INSERT INTO bracket_nodes (bracket_id, round_id, node_key)
+                    VALUES (?, ?, ?)`,
+              params: [bracketId, roundId, nodeKey],
+            },
+            {
+              requiresNodeKey: true,
               sql: `INSERT INTO bracket_nodes (
                       public_node_id, bracket_id, round_id, public_bracket_id, public_round_id,
-                      public_match_id, match_id, position, next_public_node_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                      public_match_id, match_id, position, next_public_node_id, node_key, label
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
               params: [
                 publicNodeId,
                 bracketId,
@@ -2843,51 +2935,19 @@ router.post("/brackets", async (req, res) => {
                 matchId,
                 position,
                 nextPublicNodeId,
+                nodeKey,
+                label,
               ],
             },
+            // Only if node_key column does not exist on some older DBs
             {
-              sql: `INSERT INTO bracket_nodes (
-                      public_node_id, bracket_id, round_id, public_bracket_id, public_round_id,
-                      public_match_id, match_id, position
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-              params: [
-                publicNodeId,
-                bracketId,
-                roundId,
-                publicBracketId,
-                publicRoundId,
-                publicMatchId,
-                matchId,
-                position,
-              ],
-            },
-            {
-              sql: `INSERT INTO bracket_nodes (
-                      bracket_id, round_id, public_bracket_id, public_match_id, match_id, position
-                    ) VALUES (?, ?, ?, ?, ?, ?)`,
-              params: [bracketId, roundId, publicBracketId, publicMatchId, matchId, position],
-            },
-            {
-              sql: `INSERT INTO bracket_nodes (
-                      bracket_id, round_id, public_bracket_id, match_id, position
-                    ) VALUES (?, ?, ?, ?, ?)`,
-              params: [bracketId, roundId, publicBracketId, matchId, position],
-            },
-            {
-              sql: `INSERT INTO bracket_nodes (bracket_id, round_id, match_id, position)
+              requiresNodeKey: false,
+              sql: `INSERT INTO bracket_nodes (bracket_id, round_id, position, match_id)
                     VALUES (?, ?, ?, ?)`,
-              params: [bracketId, roundId, matchId, position],
+              params: [bracketId, roundId, position, matchId],
             },
             {
-              sql: `INSERT INTO bracket_nodes (bracket_id, round_id, match_id) VALUES (?, ?, ?)`,
-              params: [bracketId, roundId, matchId],
-            },
-            // Never insert without round_id — live PG enforces NOT NULL
-            {
-              sql: `INSERT INTO bracket_nodes (bracket_id, round_id, position) VALUES (?, ?, ?)`,
-              params: [bracketId, roundId, position],
-            },
-            {
+              requiresNodeKey: false,
               sql: `INSERT INTO bracket_nodes (bracket_id, round_id) VALUES (?, ?)`,
               params: [bracketId, roundId],
             },
@@ -2895,14 +2955,32 @@ router.post("/brackets", async (req, res) => {
 
           const attempts = isUpdate ? updateAttempts : insertAttempts;
           let lastErr = null;
+          let nodeKeyColumnMissing = false;
           for (const attempt of attempts) {
+            if (attempt.requiresNodeKey === false && !nodeKeyColumnMissing) {
+              // Do not try inserts without node_key unless we know the column is absent;
+              // otherwise live PG fails with "null value in column node_key".
+              continue;
+            }
             try {
               return await connection.query(attempt.sql, attempt.params);
             } catch (e) {
               lastErr = e;
+              const msg = String(e.message || e).toLowerCase();
+              if (
+                msg.includes("node_key") &&
+                (msg.includes("does not exist") || msg.includes("unknown column"))
+              ) {
+                nodeKeyColumnMissing = true;
+              }
             }
           }
-          throw lastErr || new Error("bracket_node write failed for all schema variants");
+          throw (
+            lastErr ||
+            new Error(
+              `bracket_node write failed (bracket_id=${bracketId}, round_id=${roundId}, node_key=${nodeKey})`
+            )
+          );
         }
 
         if (existingId) {
@@ -2950,26 +3028,27 @@ router.post("/brackets", async (req, res) => {
           stats.created += 1;
         }
 
-        // Optional enrichment columns (ignore if missing on live schema)
-        if (nodeKey || label) {
+        // Guarantee required node_key (and optional label) after write
+        try {
+          await connection.query(
+            `UPDATE bracket_nodes SET
+               node_key = COALESCE(NULLIF(TRIM(node_key), ''), ?),
+               label = COALESCE(label, ?)
+             WHERE id = ?`,
+            [nodeKey, label, productionNodeId]
+          );
+        } catch (_) {
           try {
             await connection.query(
-              `UPDATE bracket_nodes SET
-                 node_key = COALESCE(?, node_key),
-                 label = COALESCE(?, label)
-               WHERE id = ?`,
-              [nodeKey, label, productionNodeId]
+              `UPDATE bracket_nodes SET node_key = COALESCE(NULLIF(node_key, ''), ?) WHERE id = ?`,
+              [nodeKey, productionNodeId]
             );
-          } catch (_) {
-            try {
-              if (nodeKey) {
-                await connection.query(
-                  `UPDATE bracket_nodes SET node_key = COALESCE(?, node_key) WHERE id = ?`,
-                  [nodeKey, productionNodeId]
-                );
-              }
-            } catch (__) {
-              /* optional columns */
+          } catch (nkErr) {
+            const msg = String(nkErr.message || "");
+            if (msg.includes("node_key") && msg.toLowerCase().includes("null")) {
+              throw new Error(
+                `bracket_node: required node_key could not be set (value=${nodeKey}): ${msg}`
+              );
             }
           }
         }
