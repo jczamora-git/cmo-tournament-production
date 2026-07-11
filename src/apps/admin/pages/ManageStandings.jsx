@@ -175,9 +175,9 @@ function ManageStandings() {
         </div>
       </div>
 
-      <div className="standings-filter-bar">
-        <label>
-          Tournament
+      <div className="brs-controls">
+        <label className="brs-control">
+          <span>Tournament</span>
           <select
             value={tournamentId}
             onChange={(e) => {
@@ -195,8 +195,8 @@ function ManageStandings() {
           </select>
         </label>
 
-        <label>
-          Mode
+        <label className="brs-control">
+          <span>Mode</span>
           <select
             value={modeId}
             onChange={(e) => setModeId(e.target.value)}
@@ -206,7 +206,7 @@ function ManageStandings() {
             {modes.map((m) => (
               <option key={m.id} value={m.id}>
                 {m.name}
-                {isBrMode(m) ? " (BR)" : ""}
+                {isBrMode(m) ? " · BR" : ""}
               </option>
             ))}
           </select>
@@ -258,7 +258,7 @@ function ManageStandings() {
         />
       ) : (
         <>
-          <BrStandingsTables groups={groups} detailed />
+          <BrStandingsTables groups={groups} detailed variant="admin" />
 
           <div className="standings-raw-toggle">
             <button

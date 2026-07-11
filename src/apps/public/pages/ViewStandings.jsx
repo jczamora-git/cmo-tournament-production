@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { Trophy } from "lucide-react";
+import { Clock3, Trophy } from "lucide-react";
 import { getBrGroupStandings, getTournaments, getTournamentModes } from "../../../services/api";
 import BrStandingsTables from "../../../components/BrStandingsTables";
 import EmptyState from "../../admin/components/EmptyState";
@@ -17,14 +17,17 @@ function isBrMode(mode) {
     type === "br" ||
     code === "br" ||
     name.includes("battle royale") ||
-    name.includes(" br")
+    /\bbr\b/.test(name)
   );
 }
 
 function formatUpdatedAt(value) {
   if (!value) return null;
   try {
-    return new Date(value).toLocaleString();
+    return new Date(value).toLocaleString(undefined, {
+      dateStyle: "medium",
+      timeStyle: "short",
+    });
   } catch {
     return String(value);
   }
@@ -48,7 +51,6 @@ function ViewStandings() {
       .finally(() => setLoadingList(false));
   }, []);
 
-  // Prefer tournaments that have BR modes when nothing selected
   useEffect(() => {
     if (loadingList || tournamentId || tournaments.length === 0) return;
 
@@ -67,7 +69,6 @@ function ViewStandings() {
       return;
     }
 
-    // Prefer modes already embedded on tournament list
     const embedded = tournaments.find((t) => String(t.id) === String(tournamentId));
     if (embedded?.modes?.length) {
       setModes(embedded.modes);
@@ -79,7 +80,6 @@ function ViewStandings() {
       .catch(() => setModes([]));
   }, [tournamentId, tournaments]);
 
-  // Keep mode valid when tournament/modes change
   useEffect(() => {
     if (!modes.length) return;
     if (modeId && modes.some((m) => String(m.id) === String(modeId))) return;
@@ -131,19 +131,34 @@ function ViewStandings() {
 
   const groups = data?.groups || [];
   const hasRows = groups.some((g) => (g.standings || []).length > 0);
+  const updatedLabel = formatUpdatedAt(data?.last_updated);
 
   if (loadingList) return <LoadingState message="Loading standings..." />;
 
   return (
-    <div>
-      <header className="public-page-header">
-        <h1>Standings</h1>
-        <p>Battle Royale group standings pushed from the tournament controller.</p>
+    <div className="brs-page">
+      <header className="brs-page-header">
+        <div className="brs-page-header-main">
+          <p className="brs-page-eyebrow">Live Group Standings</p>
+          <h1>BR Standings</h1>
+          <p className="brs-page-subtitle">
+            {selectedTournament?.name
+              ? `${selectedTournament.name}${selectedMode?.name ? ` · ${selectedMode.name}` : ""}`
+              : "Battle Royale group points after each controller sync."}
+          </p>
+        </div>
+
+        {updatedLabel ? (
+          <div className="brs-updated-chip" title="Last data update from controller push">
+            <Clock3 size={15} strokeWidth={2} aria-hidden />
+            <span>Updated {updatedLabel}</span>
+          </div>
+        ) : null}
       </header>
 
-      <div className="standings-filter-bar">
-        <label>
-          Tournament
+      <div className="brs-controls">
+        <label className="brs-control">
+          <span>Tournament</span>
           <select
             value={tournamentId}
             onChange={(e) => {
@@ -160,8 +175,8 @@ function ViewStandings() {
           </select>
         </label>
 
-        <label>
-          Mode
+        <label className="brs-control">
+          <span>Mode</span>
           <select
             value={modeId}
             onChange={(e) => setModeId(e.target.value)}
@@ -171,28 +186,12 @@ function ViewStandings() {
             {modes.map((m) => (
               <option key={m.id} value={m.id}>
                 {m.name}
-                {isBrMode(m) ? " (BR)" : ""}
+                {isBrMode(m) ? " · BR" : ""}
               </option>
             ))}
           </select>
         </label>
       </div>
-
-      {(selectedTournament || selectedMode) && (
-        <div className="standings-meta-row">
-          {selectedTournament?.name ? (
-            <span className="standings-meta-pill">{selectedTournament.name}</span>
-          ) : null}
-          {selectedMode?.name ? (
-            <span className="standings-meta-pill">{selectedMode.name}</span>
-          ) : null}
-          {data?.last_updated ? (
-            <span className="standings-meta-pill">
-              Updated {formatUpdatedAt(data.last_updated)}
-            </span>
-          ) : null}
-        </div>
-      )}
 
       {error ? <div className="admin-error-message">{error}</div> : null}
 
@@ -202,16 +201,16 @@ function ViewStandings() {
         <EmptyState
           icon={<Trophy size={48} strokeWidth={1.5} color="currentColor" />}
           title="Select a tournament"
-          description="Choose a tournament and mode to view BR group standings."
+          description="Choose a tournament and BR mode to view group standings."
         />
       ) : !hasRows ? (
         <EmptyState
           icon={<Trophy size={48} strokeWidth={1.5} color="currentColor" />}
           title="No standings yet"
-          description="Standings will appear here after the controller pushes BR group results."
+          description="Standings appear here after the controller pushes BR group results."
         />
       ) : (
-        <BrStandingsTables groups={groups} detailed={false} />
+        <BrStandingsTables groups={groups} detailed={false} variant="public" />
       )}
     </div>
   );
