@@ -71,6 +71,28 @@ async function findMatchIdByPublicId(connection, publicMatchId) {
   return rows[0]?.id || null;
 }
 
+/**
+ * Resolve production match for Controller payloads.
+ * Controller sends match_id = production match id (stored as public_match_id on controller).
+ * After table clears, that value may still be the intended production id — try id first, then public_match_id.
+ */
+async function findMatchForSync(connection, matchRef) {
+  const id = parsePositiveInt(matchRef);
+  if (!id) return null;
+
+  const [byId] = await connection.query(
+    `SELECT id, blue_team_id, red_team_id, public_match_id FROM matches WHERE id = ? LIMIT 1`,
+    [id]
+  );
+  if (byId[0]) return byId[0];
+
+  const [byPublic] = await connection.query(
+    `SELECT id, blue_team_id, red_team_id, public_match_id FROM matches WHERE public_match_id = ? LIMIT 1`,
+    [id]
+  );
+  return byPublic[0] || null;
+}
+
 function buildBrStandingsUpsertSql() {
   if (db.client === "postgres") {
     return `
@@ -522,6 +544,8 @@ router.post("/matches", async (req, res) => {
 });
 
 // 10. PUT /api/sync/matches/:id
+// Controller uses :id = previously stored production match id (public_match_id on controller).
+// After production matches are wiped, recreate the row with the same id so mapping stays valid.
 router.put("/matches/:id", async (req, res) => {
   const matchId = parsePositiveInt(req.params.id);
   if (!matchId) {
@@ -538,8 +562,6 @@ router.put("/matches/:id", async (req, res) => {
   }
 
   const body = req.body || {};
-  const updates = [];
-  const params = [];
 
   if (body.status !== undefined) {
     const normalizedStatus = normalizeStatus(body.status);
@@ -555,89 +577,126 @@ router.put("/matches/:id", async (req, res) => {
         errors: [{ message: `Invalid status: ${body.status}` }],
       });
     }
-    updates.push("status = ?");
-    params.push(normalizedStatus);
   }
 
-  const allowList = [
-    "match_no",
-    "blue_team_id",
-    "red_team_id",
-    "mode",
-    "title",
-    "queue_order",
-    "blue_score",
-    "red_score",
-    "series_completed",
-    "series_winner_team_id",
-    "series_completed_at",
-    "tournament_id",
-    "tournament_mode_id",
-  ];
+  const fields = {
+    match_no: parsePositiveInt(body.match_no) || 1,
+    blue_team_id: body.blue_team_id === undefined ? null : parsePositiveInt(body.blue_team_id) || null,
+    red_team_id: body.red_team_id === undefined ? null : parsePositiveInt(body.red_team_id) || null,
+    mode: body.mode || "BO3",
+    title: body.title || "Match",
+    queue_order: parsePositiveInt(body.queue_order) || 1,
+    blue_score: parseNonNegInt(body.blue_score, 0) ?? 0,
+    red_score: parseNonNegInt(body.red_score, 0) ?? 0,
+    status: normalizeStatus(body.status) || "queued",
+    series_completed: body.series_completed === true || body.series_completed === 1 ? 1 : 0,
+    series_winner_team_id:
+      body.series_winner_team_id === undefined
+        ? null
+        : parsePositiveInt(body.series_winner_team_id) || null,
+    series_completed_at: body.series_completed_at || null,
+    tournament_id: parsePositiveInt(body.tournament_id) || null,
+    tournament_mode_id: parsePositiveInt(body.tournament_mode_id) || null,
+    public_match_id:
+      parsePositiveInt(body.public_match_id || body.match_public_id) || matchId,
+  };
 
-  for (const field of allowList) {
-    if (body[field] !== undefined) {
-      updates.push(`${field} = ?`);
-      if (field === "title" || field === "mode" || field === "series_completed_at") {
-        params.push(body[field]);
-      } else if (field === "series_completed") {
-        params.push(body[field] === true || body[field] === 1 ? 1 : 0);
-      } else {
-        params.push(
-          body[field] === null
-            ? null
-            : parsePositiveInt(body[field]) || (body[field] === 0 ? 0 : null)
+  try {
+    await ensureSyncSchema();
+
+    const [existing] = await db.query(`SELECT id FROM matches WHERE id = ? LIMIT 1`, [matchId]);
+
+    if (existing.length > 0) {
+      await db.query(
+        `UPDATE matches SET
+          match_no = ?, blue_team_id = ?, red_team_id = ?, mode = ?, title = ?,
+          queue_order = ?, blue_score = ?, red_score = ?, status = ?,
+          series_completed = ?, series_winner_team_id = ?, series_completed_at = ?,
+          tournament_id = ?, tournament_mode_id = ?,
+          public_match_id = COALESCE(?, public_match_id),
+          updated_at = NOW()
+         WHERE id = ?`,
+        [
+          fields.match_no,
+          fields.blue_team_id,
+          fields.red_team_id,
+          fields.mode,
+          fields.title,
+          fields.queue_order,
+          fields.blue_score,
+          fields.red_score,
+          fields.status,
+          fields.series_completed,
+          fields.series_winner_team_id,
+          fields.series_completed_at,
+          fields.tournament_id,
+          fields.tournament_mode_id,
+          fields.public_match_id,
+          matchId,
+        ]
+      );
+      console.log(`[sync-api] match updated id=${matchId}`);
+      return res.json({
+        success: true,
+        received: 1,
+        created: 0,
+        updated: 1,
+        failed: 0,
+        errors: [],
+        id: matchId,
+        data: { id: matchId },
+      });
+    }
+
+    // Recreate deleted match with the same production id (Controller mapping depends on it)
+    await db.query(
+      `INSERT INTO matches (
+        id, match_no, blue_team_id, red_team_id, mode, title, queue_order,
+        blue_score, red_score, status, series_completed, series_winner_team_id,
+        series_completed_at, tournament_id, tournament_mode_id, public_match_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        matchId,
+        fields.match_no,
+        fields.blue_team_id,
+        fields.red_team_id,
+        fields.mode,
+        fields.title,
+        fields.queue_order,
+        fields.blue_score,
+        fields.red_score,
+        fields.status,
+        fields.series_completed,
+        fields.series_winner_team_id,
+        fields.series_completed_at,
+        fields.tournament_id,
+        fields.tournament_mode_id,
+        fields.public_match_id,
+      ]
+    );
+
+    // Keep serial sequence ahead of explicit ids (Postgres)
+    if (db.client === "postgres") {
+      try {
+        await db.query(
+          `SELECT setval(pg_get_serial_sequence('matches', 'id'), GREATEST((SELECT MAX(id) FROM matches), ?))`,
+          [matchId]
         );
+      } catch (_) {
+        /* ignore */
       }
     }
-  }
 
-  const publicMatchId = parsePositiveInt(body.public_match_id || body.match_public_id);
-  if (body.public_match_id !== undefined || body.match_public_id !== undefined) {
-    updates.push("public_match_id = ?");
-    params.push(publicMatchId);
-  }
-
-  if (updates.length === 0) {
-    return res.json({
+    console.log(`[sync-api] match recreated id=${matchId} (was missing after wipe)`);
+    res.json({
       success: true,
       received: 1,
-      created: 0,
+      created: 1,
       updated: 0,
       failed: 0,
       errors: [],
       id: matchId,
-      data: { id: matchId },
-    });
-  }
-
-  updates.push("updated_at = NOW()");
-  params.push(matchId);
-
-  try {
-    await ensureSyncSchema();
-    const [, meta] = await db.query(`UPDATE matches SET ${updates.join(", ")} WHERE id = ?`, params);
-    if (meta.affectedRows === 0) {
-      return res.status(404).json({
-        success: false,
-        code: "NOT_FOUND",
-        message: "Match not found",
-        received: 1,
-        created: 0,
-        updated: 0,
-        failed: 1,
-        errors: [{ message: "Match not found" }],
-      });
-    }
-    console.log(`[sync-api] match updated id=${matchId}`);
-    res.json({
-      success: true,
-      received: 1,
-      created: 0,
-      updated: 1,
-      failed: 0,
-      errors: [],
-      id: matchId,
+      recreated: true,
       data: { id: matchId },
     });
   } catch (error) {
@@ -645,7 +704,7 @@ router.put("/matches/:id", async (req, res) => {
     res.status(500).json({
       success: false,
       code: "DATABASE_ERROR",
-      message: "Database error",
+      message: error.message || "Database error",
       received: 1,
       created: 0,
       updated: 0,
@@ -1014,6 +1073,472 @@ router.put("/games/:id", async (req, res) => {
   }
 });
 
+/**
+ * Upsert a single game for a resolved local match.
+ * @returns {{ created: number, updated: number, id: number|null, error?: string }}
+ */
+async function upsertGameForMatch(connection, localMatchId, gamePayload = {}) {
+  const gNo = parsePositiveInt(gamePayload.game_no ?? gamePayload.gameNo ?? gamePayload.number);
+  if (!gNo) {
+    return { created: 0, updated: 0, id: null, error: "game_no is required" };
+  }
+
+  const normalizedStatus = normalizeStatus(gamePayload.status) || "setup";
+  if (!GAME_STATUSES.includes(normalizedStatus)) {
+    return {
+      created: 0,
+      updated: 0,
+      id: null,
+      error: `Invalid status: ${gamePayload.status}. Allowed: ${GAME_STATUSES.join(", ")}`,
+    };
+  }
+
+  const publicGameId = parsePositiveInt(
+    gamePayload.public_game_id || gamePayload.game_public_id || gamePayload.publicGameId || gamePayload.id
+  );
+  const wId = parsePositiveInt(gamePayload.winner_team_id || gamePayload.winnerTeamId);
+  const finishedAt = gamePayload.finished_at || gamePayload.finishedAt || null;
+
+  let existingId = null;
+  if (publicGameId) {
+    const [byPublic] = await connection.query(
+      `SELECT id FROM games WHERE public_game_id = ? LIMIT 1`,
+      [publicGameId]
+    );
+    if (byPublic[0]) existingId = byPublic[0].id;
+  }
+  if (!existingId) {
+    const [byPair] = await connection.query(
+      `SELECT id FROM games WHERE match_id = ? AND game_no = ? LIMIT 1`,
+      [localMatchId, gNo]
+    );
+    if (byPair[0]) existingId = byPair[0].id;
+  }
+
+  if (existingId) {
+    await connection.query(
+      `UPDATE games SET
+        match_id = ?, game_no = ?, winner_team_id = ?, status = ?,
+        finished_at = ?, public_game_id = COALESCE(?, public_game_id), updated_at = NOW()
+       WHERE id = ?`,
+      [localMatchId, gNo, wId || null, normalizedStatus, finishedAt, publicGameId, existingId]
+    );
+    return { created: 0, updated: 1, id: existingId };
+  }
+
+  const [result, meta] = await connection.query(
+    `INSERT INTO games (match_id, game_no, winner_team_id, status, finished_at, public_game_id)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [localMatchId, gNo, wId || null, normalizedStatus, finishedAt, publicGameId]
+  );
+  return { created: 1, updated: 0, id: getInsertId(result, meta) };
+}
+
+/**
+ * Resolve local match id from path/body. Optionally re-create match if deleted.
+ * Path id is treated as public_match_id first, then local id.
+ */
+async function resolveOrCreateMatchForGames(connection, pathId, body = {}) {
+  const bodyPublicMatchId = parsePositiveInt(
+    body.public_match_id || body.match_public_id || body.publicMatchId || body.match?.public_match_id
+  );
+  const bodyLocalMatchId = parsePositiveInt(body.match_id || body.matchId || body.match?.id);
+  const pathAsInt = parsePositiveInt(pathId);
+
+  // Prefer explicit public ids
+  let publicMatchId = bodyPublicMatchId || pathAsInt;
+  let localMatchId = bodyLocalMatchId;
+
+  if (!localMatchId && publicMatchId) {
+    localMatchId = await findMatchIdByPublicId(connection, publicMatchId);
+  }
+
+  // Path might be local id if not found as public
+  if (!localMatchId && pathAsInt) {
+    const [byLocal] = await connection.query(`SELECT id, public_match_id FROM matches WHERE id = ? LIMIT 1`, [
+      pathAsInt,
+    ]);
+    if (byLocal[0]) {
+      localMatchId = byLocal[0].id;
+      if (!publicMatchId && byLocal[0].public_match_id) {
+        publicMatchId = Number(byLocal[0].public_match_id);
+      }
+    }
+  }
+
+  // Re-create match shell if deleted but Controller still pushes games
+  if (!localMatchId) {
+    const matchSource = body.match && typeof body.match === "object" ? body.match : body;
+    const tournamentId = parsePositiveInt(
+      matchSource.tournament_id || matchSource.public_tournament_id || body.tournament_id
+    );
+    const tournamentModeId = parsePositiveInt(
+      matchSource.tournament_mode_id || matchSource.public_tournament_mode_id || body.tournament_mode_id
+    );
+
+    // Minimal insert so games have a parent row
+    const insertSql = `
+      INSERT INTO matches (
+        match_no, blue_team_id, red_team_id, mode, title, queue_order,
+        blue_score, red_score, status, series_completed, series_winner_team_id,
+        series_completed_at, tournament_id, tournament_mode_id, public_match_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `;
+    const params = [
+      parsePositiveInt(matchSource.match_no || matchSource.matchNo) || 1,
+      parsePositiveInt(matchSource.blue_team_id || matchSource.blueTeamId) || null,
+      parsePositiveInt(matchSource.red_team_id || matchSource.redTeamId) || null,
+      matchSource.mode || "BO3",
+      matchSource.title || "Match",
+      parsePositiveInt(matchSource.queue_order || matchSource.queueOrder) || 1,
+      parseNonNegInt(matchSource.blue_score ?? matchSource.blueScore, 0) ?? 0,
+      parseNonNegInt(matchSource.red_score ?? matchSource.redScore, 0) ?? 0,
+      normalizeStatus(matchSource.status) || "queued",
+      matchSource.series_completed === true || matchSource.series_completed === 1 ? 1 : 0,
+      parsePositiveInt(matchSource.series_winner_team_id || matchSource.seriesWinnerTeamId) || null,
+      matchSource.series_completed_at || matchSource.seriesCompletedAt || null,
+      tournamentId,
+      tournamentModeId,
+      publicMatchId || pathAsInt || null,
+    ];
+
+    // tournament_id/mode can be null in schema — still create row so games attach
+    const [result, meta] = await connection.query(insertSql, params);
+    localMatchId = getInsertId(result, meta);
+    publicMatchId = publicMatchId || pathAsInt || null;
+
+    // If public_match_id not set on insert due to null, update
+    if (publicMatchId && localMatchId) {
+      await connection.query(`UPDATE matches SET public_match_id = COALESCE(public_match_id, ?) WHERE id = ?`, [
+        publicMatchId,
+        localMatchId,
+      ]);
+    }
+
+    return { localMatchId, publicMatchId, createdMatch: true };
+  }
+
+  // Ensure public_match_id is stored when known
+  if (localMatchId && publicMatchId) {
+    await connection.query(
+      `UPDATE matches SET public_match_id = COALESCE(public_match_id, ?), updated_at = NOW() WHERE id = ?`,
+      [publicMatchId, localMatchId]
+    );
+  }
+
+  return { localMatchId, publicMatchId, createdMatch: false };
+}
+
+/**
+ * Handler: create/update match (if needed) + batch upsert games.
+ * Used by Controller paths like POST /api/sync/push/matches/:id/with-games
+ */
+async function handleMatchWithGames(req, res) {
+  const pathId = req.params.id;
+  const body = req.body || {};
+  const games = Array.isArray(body.games)
+    ? body.games
+    : Array.isArray(body.with_games)
+      ? body.with_games
+      : Array.isArray(body.items)
+        ? body.items
+        : body.game
+          ? [body.game]
+          : [];
+
+  // Single-game body fallback
+  if (!games.length && (body.game_no != null || body.gameNo != null)) {
+    games.push(body);
+  }
+
+  const stats = emptySyncStats(games.length);
+  stats.message = "Match with games sync";
+  const gameResults = [];
+
+  if (!games.length) {
+    return res.status(400).json({
+      success: false,
+      code: "VALIDATION_ERROR",
+      message: "No games array provided. Expected body.games = [{ game_no, status, ... }]",
+      received: 0,
+      created: 0,
+      updated: 0,
+      failed: 0,
+      errors: [{ item: "games", error: "games array is required (or provide game_no for single game)" }],
+    });
+  }
+
+  const connection = await db.getConnection();
+  try {
+    await ensureSyncSchema(connection);
+    await connection.beginTransaction();
+
+    const { localMatchId, publicMatchId, createdMatch } = await resolveOrCreateMatchForGames(
+      connection,
+      pathId,
+      body
+    );
+
+    if (!localMatchId) {
+      await connection.rollback();
+      connection.release();
+      return res.status(404).json({
+        success: false,
+        code: "MATCH_NOT_FOUND",
+        message: `Could not resolve match for id=${pathId}. Push matches first or include match fields so the match can be recreated.`,
+        received: games.length,
+        created: 0,
+        updated: 0,
+        failed: games.length,
+        errors: [{ item: "match", error: `Match not found for path id ${pathId}` }],
+      });
+    }
+
+    if (createdMatch) {
+      stats.message = "Match recreated then games synced";
+    }
+
+    for (let i = 0; i < games.length; i++) {
+      const g = games[i] || {};
+      try {
+        const result = await upsertGameForMatch(connection, localMatchId, g);
+        if (result.error) {
+          stats.failed += 1;
+          stats.errors.push({
+            item: `game[${i}]`,
+            game_no: g.game_no ?? g.gameNo ?? null,
+            error: result.error,
+          });
+        } else {
+          stats.created += result.created;
+          stats.updated += result.updated;
+          gameResults.push({
+            id: result.id,
+            game_no: g.game_no ?? g.gameNo ?? null,
+            action: result.created ? "created" : "updated",
+          });
+        }
+      } catch (err) {
+        stats.failed += 1;
+        stats.errors.push({
+          item: `game[${i}]`,
+          game_no: g.game_no ?? g.gameNo ?? null,
+          error: err.message,
+        });
+      }
+    }
+
+    await connection.commit();
+    connection.release();
+
+    stats.success = stats.failed === 0;
+    stats.match_id = localMatchId;
+    stats.public_match_id = publicMatchId || null;
+    stats.games = gameResults;
+    stats.received = games.length;
+
+    console.log(
+      `[sync-api] with-games match=${localMatchId} public=${publicMatchId || pathId} received=${stats.received} created=${stats.created} updated=${stats.updated} failed=${stats.failed} recreatedMatch=${!!createdMatch}`
+    );
+
+    if (stats.created + stats.updated === 0 && stats.failed > 0) {
+      return res.status(400).json({
+        ...stats,
+        success: false,
+        code: "SYNC_FAILED",
+        message: "All games failed to sync. See errors.",
+      });
+    }
+
+    res.json(stats);
+  } catch (error) {
+    try {
+      await connection.rollback();
+    } catch (_) {
+      /* ignore */
+    }
+    try {
+      connection.release();
+    } catch (_) {
+      /* ignore */
+    }
+    console.error("[sync-api] with-games error:", error.message);
+    res.status(500).json({
+      success: false,
+      code: "DATABASE_ERROR",
+      message: error.message || "Database error",
+      received: games.length,
+      created: 0,
+      updated: 0,
+      failed: games.length || 1,
+      errors: [{ item: "server", error: error.message }],
+    });
+  }
+}
+
+// Controller-compatible aliases (games endpoint "not found" fix)
+// Primary: POST /api/sync/push/matches/:id/with-games
+router.post("/push/matches/:id/with-games", handleMatchWithGames);
+router.put("/push/matches/:id/with-games", handleMatchWithGames);
+router.post("/matches/:id/with-games", handleMatchWithGames);
+router.put("/matches/:id/with-games", handleMatchWithGames);
+router.post("/matches/:id/games", handleMatchWithGames);
+router.put("/matches/:id/games", handleMatchWithGames);
+
+// Batch games: POST /api/sync/push/games  and  POST /api/sync/games/batch
+async function handleGamesBatch(req, res) {
+  const body = req.body || {};
+  const games = Array.isArray(body.games)
+    ? body.games
+    : Array.isArray(body.items)
+      ? body.items
+      : Array.isArray(body)
+        ? body
+        : body.game
+          ? [body.game]
+          : body.game_no != null || body.gameNo != null
+            ? [body]
+            : [];
+
+  const stats = emptySyncStats(games.length);
+  stats.message = "Games batch sync";
+
+  if (!games.length) {
+    return res.status(400).json({
+      success: false,
+      code: "VALIDATION_ERROR",
+      message: "No games provided. Send { games: [...] } or a single game object.",
+      received: 0,
+      created: 0,
+      updated: 0,
+      failed: 0,
+      errors: [{ item: "games", error: "empty" }],
+    });
+  }
+
+  const connection = await db.getConnection();
+  try {
+    await ensureSyncSchema(connection);
+    await connection.beginTransaction();
+
+    for (let i = 0; i < games.length; i++) {
+      const g = games[i] || {};
+      try {
+        const publicMatchId = parsePositiveInt(
+          g.public_match_id || g.match_public_id || g.publicMatchId || body.public_match_id
+        );
+        let localMatchId = parsePositiveInt(g.match_id || g.matchId || body.match_id);
+
+        if (!localMatchId && publicMatchId) {
+          localMatchId = await findMatchIdByPublicId(connection, publicMatchId);
+        }
+
+        if (!localMatchId) {
+          // Attempt recreate from game payload + body context
+          const resolved = await resolveOrCreateMatchForGames(connection, publicMatchId, {
+            ...body,
+            ...g,
+            public_match_id: publicMatchId,
+          });
+          localMatchId = resolved.localMatchId;
+        }
+
+        if (!localMatchId) {
+          stats.failed += 1;
+          stats.errors.push({
+            item: `game[${i}]`,
+            error: `Match not found (match_id/public_match_id missing or deleted). Sync matches first.`,
+            public_match_id: publicMatchId || null,
+          });
+          continue;
+        }
+
+        const result = await upsertGameForMatch(connection, localMatchId, g);
+        if (result.error) {
+          stats.failed += 1;
+          stats.errors.push({ item: `game[${i}]`, error: result.error });
+        } else {
+          stats.created += result.created;
+          stats.updated += result.updated;
+        }
+      } catch (err) {
+        stats.failed += 1;
+        stats.errors.push({ item: `game[${i}]`, error: err.message });
+      }
+    }
+
+    await connection.commit();
+    connection.release();
+
+    stats.success = stats.failed === 0;
+    console.log(
+      `[sync-api] games-batch received=${stats.received} created=${stats.created} updated=${stats.updated} failed=${stats.failed}`
+    );
+
+    if (stats.created + stats.updated === 0 && stats.failed > 0) {
+      return res.status(400).json({
+        ...stats,
+        success: false,
+        code: "SYNC_FAILED",
+        message: "All games failed to sync. See errors.",
+      });
+    }
+    res.json(stats);
+  } catch (error) {
+    try {
+      await connection.rollback();
+    } catch (_) {
+      /* ignore */
+    }
+    try {
+      connection.release();
+    } catch (_) {
+      /* ignore */
+    }
+    console.error("[sync-api] games-batch error:", error.message);
+    res.status(500).json({
+      success: false,
+      code: "DATABASE_ERROR",
+      message: error.message || "Database error",
+      received: games.length,
+      created: 0,
+      updated: 0,
+      failed: games.length || 1,
+      errors: [{ item: "server", error: error.message }],
+    });
+  }
+}
+
+router.post("/push/games", handleGamesBatch);
+router.put("/push/games", handleGamesBatch);
+router.post("/games/batch", handleGamesBatch);
+router.put("/games/batch", handleGamesBatch);
+
+// Discovery helper so Controller can detect available endpoints
+router.get("/endpoints", (req, res) => {
+  res.json({
+    success: true,
+    endpoints: [
+      "GET /api/sync/tournaments",
+      "GET /api/sync/tournament-modes",
+      "GET /api/sync/teams",
+      "GET /api/sync/players",
+      "POST /api/sync/matches",
+      "PUT /api/sync/matches/:id",
+      "POST /api/sync/games",
+      "PUT /api/sync/games/:id",
+      "POST /api/sync/games/batch",
+      "POST /api/sync/push/games",
+      "POST /api/sync/push/matches/:id/with-games",
+      "POST /api/sync/matches/:id/with-games",
+      "POST /api/sync/matches/:id/games",
+      "POST /api/sync/brackets",
+      "POST /api/sync/standings/br",
+      "GET /api/sync/standings/br",
+    ],
+  });
+});
+
 function asArray(value) {
   if (Array.isArray(value)) return value;
   if (value == null) return [];
@@ -1133,6 +1658,9 @@ router.post("/brackets", async (req, res) => {
   // Debug log (safe summary) to diagnose Controller payload mismatches
   try {
     const keys = body && typeof body === "object" ? Object.keys(body) : [];
+    const sampleBracket = Array.isArray(body.brackets)
+      ? body.brackets[0]
+      : body.bracket || body?.data?.brackets?.[0] || null;
     console.log("[sync-api] /brackets received keys:", keys.join(", ") || "(none)");
     console.log(
       "[sync-api] /brackets payload summary:",
@@ -1154,6 +1682,18 @@ router.post("/brackets", async (req, res) => {
           : Array.isArray(body.nodes)
             ? body.nodes.length
             : 0,
+        sample_bracket_keys: sampleBracket && typeof sampleBracket === "object" ? Object.keys(sampleBracket) : [],
+        sample_bracket: sampleBracket
+          ? {
+              id: sampleBracket.id ?? null,
+              public_bracket_id: sampleBracket.public_bracket_id ?? sampleBracket.publicBracketId ?? null,
+              name: sampleBracket.name ?? sampleBracket.title ?? null,
+              tournament_id: sampleBracket.tournament_id ?? sampleBracket.public_tournament_id ?? null,
+              tournament_mode_id:
+                sampleBracket.tournament_mode_id ?? sampleBracket.public_tournament_mode_id ?? null,
+              has_settings_json: sampleBracket.settings_json !== undefined || sampleBracket.settings !== undefined,
+            }
+          : null,
       })
     );
   } catch (_) {
@@ -1658,15 +2198,47 @@ router.post("/brackets", async (req, res) => {
 
     // Partial success → 200; total failure with errors → 400 with detailed messages
     if (stats.created + stats.updated === 0 && stats.failed > 0) {
+      const firstErrors = (stats.errors || []).slice(0, 5);
+      const detail = firstErrors
+        .map((e) => {
+          const who = e.entity || e.item || "item";
+          const idPart =
+            e.public_bracket_id || e.public_round_id || e.public_node_id || e.item || "";
+          return `${who}${idPart ? `(${idPart})` : ""}: ${e.message || e.error || "unknown"}`;
+        })
+        .join(" | ");
+
       return res.status(400).json({
         ...response,
         success: false,
         code: "SYNC_FAILED",
-        message: "Bracket sync failed for all items. See errors for details.",
+        message: detail
+          ? `Bracket sync failed for all items. ${detail}`
+          : "Bracket sync failed for all items. See errors for details.",
+        errors: (stats.errors || []).map((e) => ({
+          item: e.entity || e.item || "unknown",
+          public_bracket_id: e.public_bracket_id ?? null,
+          public_round_id: e.public_round_id ?? null,
+          public_node_id: e.public_node_id ?? null,
+          error: e.message || e.error || "unknown",
+        })),
       });
     }
 
-    res.json(response);
+    res.json({
+      ...response,
+      message:
+        stats.failed > 0
+          ? `Bracket sync completed with ${stats.failed} failed item(s)`
+          : "Bracket sync completed",
+      errors: (stats.errors || []).map((e) => ({
+        item: e.entity || e.item || "unknown",
+        public_bracket_id: e.public_bracket_id ?? null,
+        public_round_id: e.public_round_id ?? null,
+        public_node_id: e.public_node_id ?? null,
+        error: e.message || e.error || "unknown",
+      })),
+    });
   } catch (error) {
     try {
       await connection.rollback();
