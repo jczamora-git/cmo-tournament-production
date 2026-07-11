@@ -52,6 +52,24 @@ async function ensureSyncSchema(connection = db) {
           updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
       `);
+      // Older installs may have created bracket_rounds without public_* columns
+      await connection.query(
+        `ALTER TABLE bracket_rounds ADD COLUMN IF NOT EXISTS public_round_id INTEGER`
+      );
+      await connection.query(
+        `ALTER TABLE bracket_rounds ADD COLUMN IF NOT EXISTS public_bracket_id INTEGER`
+      );
+      await connection.query(
+        `ALTER TABLE bracket_rounds ADD COLUMN IF NOT EXISTS round_number INTEGER DEFAULT 1`
+      );
+      await connection.query(
+        `ALTER TABLE bracket_rounds ADD COLUMN IF NOT EXISTS sort_order INTEGER DEFAULT 0`
+      );
+      await connection.query(`
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_bracket_rounds_public_round_id
+        ON bracket_rounds (public_round_id) WHERE public_round_id IS NOT NULL
+      `);
+
       await connection.query(`
         CREATE TABLE IF NOT EXISTS bracket_nodes (
           id SERIAL PRIMARY KEY,
@@ -72,6 +90,28 @@ async function ensureSyncSchema(connection = db) {
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
           updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
+      `);
+      await connection.query(
+        `ALTER TABLE bracket_nodes ADD COLUMN IF NOT EXISTS public_node_id INTEGER`
+      );
+      await connection.query(
+        `ALTER TABLE bracket_nodes ADD COLUMN IF NOT EXISTS public_bracket_id INTEGER`
+      );
+      await connection.query(
+        `ALTER TABLE bracket_nodes ADD COLUMN IF NOT EXISTS public_round_id INTEGER`
+      );
+      await connection.query(
+        `ALTER TABLE bracket_nodes ADD COLUMN IF NOT EXISTS public_match_id INTEGER`
+      );
+      await connection.query(
+        `ALTER TABLE bracket_nodes ADD COLUMN IF NOT EXISTS node_key VARCHAR(64)`
+      );
+      await connection.query(
+        `ALTER TABLE bracket_nodes ADD COLUMN IF NOT EXISTS label VARCHAR(255)`
+      );
+      await connection.query(`
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_bracket_nodes_public_node_id
+        ON bracket_nodes (public_node_id) WHERE public_node_id IS NOT NULL
       `);
     } else {
       // MySQL: best-effort column adds

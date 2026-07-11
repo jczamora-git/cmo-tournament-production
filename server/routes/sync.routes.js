@@ -1716,8 +1716,19 @@ function pickPublicId(...candidates) {
   return null;
 }
 
+/** Non-empty string key for same-request Controller local id maps (allows string keys). */
+function pickControllerKey(...candidates) {
+  for (const c of candidates) {
+    if (c === undefined || c === null || c === "") continue;
+    if (typeof c === "number" && Number.isFinite(c) && c > 0) return String(c);
+    const s = String(c).trim();
+    if (s) return s;
+  }
+  return null;
+}
+
 // 12b. POST /api/sync/brackets
-// Upserts brackets + rounds + nodes using public_* IDs from Controller.
+// Supports first-time create (public_* ids null) and subsequent update by public_* ids.
 router.post("/brackets", async (req, res) => {
   const body = req.body || {};
 
@@ -1813,228 +1824,479 @@ router.post("/brackets", async (req, res) => {
   }
 
   const connection = await db.getConnection();
-  const bracketIdByPublic = new Map();
-  const roundIdByPublic = new Map();
-  const nodeIdByPublic = new Map();
+  /**
+   * Maps Controller-side keys → production primary keys for THIS request.
+   * Keys may be: public_* id, Controller local id, or client_key strings.
+   */
+  const bracketIdByKey = new Map();
+  const roundIdByKey = new Map();
+  const nodeIdByKey = new Map();
+  /** (productionBracketId, round_number) → production round id */
+  const roundIdByBracketAndNumber = new Map();
+
+  let latestBracketId = null;
+  let latestPublicBracketId = null;
+  const mappings = { brackets: [], rounds: [], nodes: [] };
+
+  const roundMapKey = (bracketId, roundNumber) => `${bracketId}:${roundNumber}`;
+
+  function rememberBracketKeys(productionId, publicId, item) {
+    const keys = [
+      publicId,
+      productionId,
+      item?.public_bracket_id,
+      item?.publicBracketId,
+      item?.controller_bracket_id,
+      item?.local_id,
+      item?.localId,
+      item?.client_key,
+      item?.clientKey,
+      item?.id, // Controller local id on first push
+      item?.bracket_id,
+    ];
+    for (const k of keys) {
+      const key = pickControllerKey(k);
+      if (key) bracketIdByKey.set(key, productionId);
+    }
+  }
+
+  function rememberRoundKeys(productionId, publicId, item, bracketId, roundNumber) {
+    const keys = [
+      publicId,
+      productionId,
+      item?.public_round_id,
+      item?.publicRoundId,
+      item?.controller_round_id,
+      item?.local_id,
+      item?.id,
+    ];
+    for (const k of keys) {
+      const key = pickControllerKey(k);
+      if (key) roundIdByKey.set(key, productionId);
+    }
+    if (bracketId && roundNumber) {
+      roundIdByBracketAndNumber.set(roundMapKey(bracketId, roundNumber), productionId);
+    }
+  }
+
+  function rememberNodeKeys(productionId, publicId, item) {
+    const keys = [
+      publicId,
+      productionId,
+      item?.public_node_id,
+      item?.publicNodeId,
+      item?.controller_node_id,
+      item?.local_id,
+      item?.id,
+      item?.node_key,
+      item?.nodeKey,
+    ];
+    for (const k of keys) {
+      const key = pickControllerKey(k);
+      if (key) nodeIdByKey.set(key, productionId);
+    }
+  }
 
   try {
     await ensureSyncSchema(connection);
 
-    // Soft context check (do not hard-fail entire sync if mode row is missing/mismatched)
     if (defaultTournamentId && defaultModeId) {
       const [modeRows] = await connection.query(
         `SELECT id FROM tournament_modes WHERE id = ? AND tournament_id = ?`,
         [defaultModeId, defaultTournamentId]
       );
       if (modeRows.length === 0) {
-        const [modeExists] = await connection.query(`SELECT id, tournament_id FROM tournament_modes WHERE id = ?`, [
-          defaultModeId,
-        ]);
-        if (modeExists.length === 0) {
-          warnings.push({
-            code: "MODE_NOT_FOUND",
-            message: `tournament_mode_id ${defaultModeId} not found; continuing with provided IDs`,
-          });
-        } else {
-          warnings.push({
-            code: "CONTEXT_MISMATCH",
-            message: `tournament_mode_id ${defaultModeId} belongs to tournament ${modeExists[0].tournament_id}, not ${defaultTournamentId}; continuing with provided IDs`,
-          });
-        }
+        warnings.push({
+          code: "MODE_CONTEXT_SOFT",
+          message: `tournament_mode_id ${defaultModeId} not verified against tournament ${defaultTournamentId}; continuing`,
+        });
       }
     }
 
     await connection.beginTransaction();
 
-    // 1) Brackets
+    /**
+     * Create or update one bracket row. Used for payload brackets[] and auto-create.
+     */
+    async function upsertOneBracket(item, { isAutoCreate = false } = {}) {
+      const tournamentId =
+        parsePositiveInt(item.tournament_id ?? item.public_tournament_id ?? item.tournamentId) ||
+        defaultTournamentId;
+      const tournamentModeId =
+        parsePositiveInt(
+          item.tournament_mode_id ?? item.public_tournament_mode_id ?? item.tournamentModeId
+        ) || defaultModeId;
+
+      if (!tournamentId || !tournamentModeId) {
+        throw new Error(
+          "Missing tournament_id and/or tournament_mode_id for bracket creation (provide at root or on the bracket item)"
+        );
+      }
+      if (!defaultTournamentId) defaultTournamentId = tournamentId;
+      if (!defaultModeId) defaultModeId = tournamentModeId;
+
+      // Production public id (known only after first successful sync back to Controller)
+      let publicBracketId = pickPublicId(item.public_bracket_id, item.publicBracketId);
+
+      // Controller local identity for same-request child linking (first-time create)
+      const controllerLocalKey = pickControllerKey(
+        item.controller_bracket_id,
+        item.local_id,
+        item.localId,
+        item.client_key,
+        item.clientKey,
+        item.id // Controller local PK on first push when public_bracket_id is null
+      );
+
+      const name =
+        (item.name != null && String(item.name).trim()) ||
+        (item.title != null && String(item.title).trim()) ||
+        (isAutoCreate ? "Bracket" : "Bracket");
+      const bracketType =
+        item.bracket_type || item.bracketType || item.type || "single_elimination";
+      const status = normalizeStatus(item.status) || "active";
+      const settingsJson = normalizeSettingsJson(
+        item.settings_json !== undefined
+          ? item.settings_json
+          : item.settingsJson !== undefined
+            ? item.settingsJson
+            : item.settings
+      );
+
+      let existingId = null;
+
+      // Update path: known public_bracket_id
+      if (publicBracketId) {
+        const [found] = await connection.query(
+          `SELECT id FROM brackets WHERE public_bracket_id = ? OR id = ? LIMIT 1`,
+          [publicBracketId, publicBracketId]
+        );
+        if (found[0]) existingId = found[0].id;
+      }
+
+      // Idempotent first-time: reuse only when auto-creating parent for rounds/nodes,
+      // or when payload has a single bracket with null public_bracket_id.
+      if (
+        !existingId &&
+        !publicBracketId &&
+        tournamentId &&
+        tournamentModeId &&
+        (isAutoCreate || brackets.length <= 1)
+      ) {
+        const [foundMode] = await connection.query(
+          `SELECT id, public_bracket_id FROM brackets
+           WHERE tournament_id = ? AND tournament_mode_id = ?
+           ORDER BY id DESC LIMIT 1`,
+          [tournamentId, tournamentModeId]
+        );
+        if (foundMode[0]) {
+          existingId = foundMode[0].id;
+          if (foundMode[0].public_bracket_id) {
+            publicBracketId = Number(foundMode[0].public_bracket_id);
+          }
+        }
+      }
+
+      let productionId = null;
+      let wasCreated = false;
+
+      if (existingId) {
+        productionId = existingId;
+        await connection.query(
+          `UPDATE brackets SET
+            tournament_id = ?, tournament_mode_id = ?, name = ?, bracket_type = ?,
+            status = ?,
+            public_bracket_id = COALESCE(public_bracket_id, ?),
+            settings_json = COALESCE(?, settings_json),
+            updated_at = NOW()
+           WHERE id = ?`,
+          [
+            tournamentId,
+            tournamentModeId,
+            name,
+            bracketType,
+            status,
+            publicBracketId || existingId,
+            settingsJson === undefined ? null : settingsJson,
+            existingId,
+          ]
+        );
+        if (settingsJson === null) {
+          await connection.query(`UPDATE brackets SET settings_json = NULL WHERE id = ?`, [existingId]);
+        }
+        // Ensure public_bracket_id is set for Controller mapping
+        const [row] = await connection.query(
+          `SELECT public_bracket_id FROM brackets WHERE id = ?`,
+          [productionId]
+        );
+        if (!row[0]?.public_bracket_id) {
+          await connection.query(`UPDATE brackets SET public_bracket_id = ? WHERE id = ?`, [
+            productionId,
+            productionId,
+          ]);
+          publicBracketId = productionId;
+        } else {
+          publicBracketId = Number(row[0].public_bracket_id);
+        }
+        stats.updated += 1;
+      } else {
+        // First-time creation — public_bracket_id may be null
+        const [result, meta] = await connection.query(
+          `INSERT INTO brackets (
+            public_bracket_id, tournament_id, tournament_mode_id, name, bracket_type, status, settings_json
+          ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [
+            publicBracketId, // may be null
+            tournamentId,
+            tournamentModeId,
+            name,
+            bracketType,
+            status,
+            settingsJson === undefined ? null : settingsJson,
+          ]
+        );
+        productionId = getInsertId(result, meta);
+        if (!productionId) {
+          throw new Error("Bracket insert succeeded but no id was returned");
+        }
+        // Assign public_bracket_id = production id when Controller sent null
+        if (!publicBracketId) {
+          await connection.query(`UPDATE brackets SET public_bracket_id = ? WHERE id = ?`, [
+            productionId,
+            productionId,
+          ]);
+          publicBracketId = productionId;
+        }
+        wasCreated = true;
+        stats.created += 1;
+      }
+
+      latestBracketId = productionId;
+      latestPublicBracketId = publicBracketId || productionId;
+      rememberBracketKeys(productionId, publicBracketId || productionId, item);
+      if (controllerLocalKey) bracketIdByKey.set(controllerLocalKey, productionId);
+
+      mappings.brackets.push({
+        public_bracket_id: publicBracketId || productionId,
+        id: productionId,
+        controller_key: controllerLocalKey,
+        created: wasCreated,
+      });
+
+      return { productionId, publicBracketId: publicBracketId || productionId, wasCreated };
+    }
+
+    // 1) Brackets first
     for (const item of brackets) {
       try {
         if (!item || typeof item !== "object") {
           throw new Error("Invalid bracket item (expected object)");
         }
-
-        const publicBracketId = pickPublicId(
-          item.public_bracket_id,
-          item.publicBracketId,
-          item.id
-        );
-        const tournamentId =
-          parsePositiveInt(
-            item.tournament_id ?? item.public_tournament_id ?? item.tournamentId
-          ) || defaultTournamentId;
-        const tournamentModeId =
-          parsePositiveInt(
-            item.tournament_mode_id ??
-              item.public_tournament_mode_id ??
-              item.tournamentModeId
-          ) || defaultModeId;
-
-        if (!tournamentId || !tournamentModeId) {
-          throw new Error(
-            "Missing tournament_id and/or tournament_mode_id on bracket (and not provided at payload root)"
-          );
-        }
-        // Keep defaults for subsequent rounds/nodes if only set on first bracket
-        if (!defaultTournamentId) defaultTournamentId = tournamentId;
-        if (!defaultModeId) defaultModeId = tournamentModeId;
-
-        const name =
-          (item.name != null && String(item.name).trim()) ||
-          (item.title != null && String(item.title).trim()) ||
-          "Bracket";
-        const bracketType =
-          item.bracket_type || item.bracketType || item.type || "single_elimination";
-        const status = normalizeStatus(item.status) || "active";
-        const settingsJson = normalizeSettingsJson(
-          item.settings_json !== undefined
-            ? item.settings_json
-            : item.settingsJson !== undefined
-              ? item.settingsJson
-              : item.settings
-        );
-
-        let existingId = null;
-        if (publicBracketId) {
-          const [found] = await connection.query(
-            `SELECT id FROM brackets WHERE public_bracket_id = ? LIMIT 1`,
-            [publicBracketId]
-          );
-          if (found[0]) existingId = found[0].id;
-        }
-
-        if (existingId) {
-          await connection.query(
-            `UPDATE brackets SET
-              tournament_id = ?, tournament_mode_id = ?, name = ?, bracket_type = ?,
-              status = ?, public_bracket_id = ?,
-              settings_json = COALESCE(?, settings_json),
-              updated_at = NOW()
-             WHERE id = ?`,
-            [
-              tournamentId,
-              tournamentModeId,
-              name,
-              bracketType,
-              status,
-              publicBracketId,
-              settingsJson === undefined ? null : settingsJson,
-              existingId,
-            ]
-          );
-          // If settingsJson was explicitly null, force null
-          if (settingsJson === null) {
-            await connection.query(`UPDATE brackets SET settings_json = NULL WHERE id = ?`, [existingId]);
-          }
-          stats.updated += 1;
-          if (publicBracketId) bracketIdByPublic.set(publicBracketId, existingId);
-        } else {
-          const [result, meta] = await connection.query(
-            `INSERT INTO brackets (
-              public_bracket_id, tournament_id, tournament_mode_id, name, bracket_type, status, settings_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-            [
-              publicBracketId,
-              tournamentId,
-              tournamentModeId,
-              name,
-              bracketType,
-              status,
-              settingsJson === undefined ? null : settingsJson,
-            ]
-          );
-          const newId = getInsertId(result, meta);
-          stats.created += 1;
-          if (publicBracketId) bracketIdByPublic.set(publicBracketId, newId);
-        }
+        await upsertOneBracket(item);
       } catch (err) {
         stats.failed += 1;
         stats.errors.push({
           entity: "bracket",
+          item: "bracket",
           public_bracket_id: item?.public_bracket_id ?? item?.id ?? null,
+          error: err.message,
           message: err.message,
         });
       }
     }
 
-    // 2) Rounds
+    // If Controller only sent rounds/nodes (or brackets failed), auto-create a parent bracket
+    if (!latestBracketId && (rounds.length > 0 || nodes.length > 0)) {
+      try {
+        if (!defaultTournamentId || !defaultModeId) {
+          throw new Error(
+            "Cannot auto-create parent bracket: tournament_id and tournament_mode_id are required at payload root for first-time sync"
+          );
+        }
+        const auto = await upsertOneBracket(
+          {
+            tournament_id: defaultTournamentId,
+            tournament_mode_id: defaultModeId,
+            name: "Bracket",
+          },
+          { isAutoCreate: true }
+        );
+        warnings.push({
+          code: "AUTO_CREATED_BRACKET",
+          message: `Auto-created parent bracket id=${auto.productionId} public_bracket_id=${auto.publicBracketId} for rounds/nodes (brackets[] empty or failed)`,
+        });
+      } catch (err) {
+        stats.failed += 1;
+        stats.errors.push({
+          entity: "bracket",
+          item: "bracket",
+          error: err.message,
+          message: err.message,
+        });
+      }
+    }
+
+    async function resolveBracketIdForChild(item, entityLabel) {
+      // Prefer explicit production/public ids, then Controller local bracket_id / id references
+      const keyCandidates = [
+        item.public_bracket_id,
+        item.publicBracketId,
+        item.bracket_public_id,
+        item.controller_bracket_id,
+        item.local_bracket_id,
+        item.bracket_id,
+        item.bracketId,
+        item.client_bracket_key,
+      ];
+
+      let bracketId = null;
+      let matchedKey = null;
+      for (const c of keyCandidates) {
+        const key = pickControllerKey(c);
+        if (key && bracketIdByKey.has(key)) {
+          bracketId = bracketIdByKey.get(key);
+          matchedKey = key;
+          break;
+        }
+      }
+
+      // DB lookup by public_bracket_id / id
+      if (!bracketId) {
+        const pub = pickPublicId(...keyCandidates);
+        if (pub) {
+          const [found] = await connection.query(
+            `SELECT id, public_bracket_id FROM brackets WHERE public_bracket_id = ? OR id = ? LIMIT 1`,
+            [pub, pub]
+          );
+          if (found[0]) {
+            bracketId = found[0].id;
+            bracketIdByKey.set(String(pub), bracketId);
+            matchedKey = String(pub);
+          }
+        }
+      }
+
+      // Same-request parent (first-time: public_bracket_id was null on children)
+      if (!bracketId && latestBracketId) {
+        bracketId = latestBracketId;
+        warnings.push({
+          code: "RESOLVED_LATEST_BRACKET",
+          message: `${entityLabel}: linked to parent bracket id=${bracketId} created in this request (child public_bracket_id was null)`,
+        });
+      }
+
+      // Last resort: newest bracket for tournament mode
+      if (!bracketId && defaultTournamentId && defaultModeId) {
+        const [found] = await connection.query(
+          `SELECT id, public_bracket_id FROM brackets
+           WHERE tournament_id = ? AND tournament_mode_id = ?
+           ORDER BY id DESC LIMIT 1`,
+          [defaultTournamentId, defaultModeId]
+        );
+        if (found[0]) {
+          bracketId = found[0].id;
+          latestBracketId = bracketId;
+          latestPublicBracketId = found[0].public_bracket_id || bracketId;
+        }
+      }
+
+      if (!bracketId) {
+        throw new Error(
+          `${entityLabel}: Cannot resolve parent bracket. ` +
+            `public_bracket_id is missing/null and no bracket exists for this tournament mode. ` +
+            `Include brackets[] with tournament_id + tournament_mode_id on first-time sync, or provide public_bracket_id for updates.`
+        );
+      }
+
+      // Resolve public id for mapping response
+      let publicBracketId = latestPublicBracketId || bracketId;
+      const [brow] = await connection.query(
+        `SELECT public_bracket_id FROM brackets WHERE id = ? LIMIT 1`,
+        [bracketId]
+      );
+      if (brow[0]?.public_bracket_id) {
+        publicBracketId = Number(brow[0].public_bracket_id);
+        latestPublicBracketId = publicBracketId;
+      }
+
+      return { bracketId, publicBracketId, matchedKey };
+    }
+
+    // 2) Rounds — public_round_id optional on first sync
     for (const item of rounds) {
       try {
         if (!item || typeof item !== "object") {
           throw new Error("Invalid bracket_round item (expected object)");
         }
 
-        const publicRoundId = pickPublicId(item.public_round_id, item.publicRoundId, item.id);
-        const publicBracketId = pickPublicId(
-          item.public_bracket_id,
-          item.publicBracketId,
-          item.bracket_public_id
+        let publicRoundId = pickPublicId(item.public_round_id, item.publicRoundId);
+        const controllerRoundKey = pickControllerKey(
+          item.controller_round_id,
+          item.local_id,
+          item.id
         );
-        let bracketId =
-          parsePositiveInt(item.bracket_id || item.bracketId) ||
-          (publicBracketId ? bracketIdByPublic.get(publicBracketId) : null);
+        const { bracketId, publicBracketId } = await resolveBracketIdForChild(item, "bracket_round");
 
-        if (!bracketId && publicBracketId) {
-          const [found] = await connection.query(
-            `SELECT id FROM brackets WHERE public_bracket_id = ? LIMIT 1`,
-            [publicBracketId]
-          );
-          if (found[0]) {
-            bracketId = found[0].id;
-            bracketIdByPublic.set(publicBracketId, bracketId);
-          }
-        }
-
-        // If still no bracket, auto-create a placeholder from context
-        if (!bracketId) {
-          const tournamentId =
-            parsePositiveInt(item.tournament_id ?? item.public_tournament_id) || defaultTournamentId;
-          const tournamentModeId =
-            parsePositiveInt(item.tournament_mode_id ?? item.public_tournament_mode_id) ||
-            defaultModeId;
-          if (!tournamentId || !tournamentModeId || !publicBracketId) {
-            throw new Error(
-              `Cannot resolve bracket for round (public_round_id=${publicRoundId}). Provide public_bracket_id and tournament context.`
-            );
-          }
-          const [result, meta] = await connection.query(
-            `INSERT INTO brackets (
-              public_bracket_id, tournament_id, tournament_mode_id, name, bracket_type, status
-            ) VALUES (?, ?, ?, ?, ?, ?)`,
-            [publicBracketId, tournamentId, tournamentModeId, "Bracket", "single_elimination", "active"]
-          );
-          bracketId = getInsertId(result, meta);
-          bracketIdByPublic.set(publicBracketId, bracketId);
-          stats.created += 1;
-          warnings.push({
-            code: "AUTO_CREATED_BRACKET",
-            message: `Auto-created bracket public_bracket_id=${publicBracketId} for round linkage`,
-          });
-        }
-
-        const name = item.name != null ? String(item.name) : item.title != null ? String(item.title) : null;
+        const name =
+          item.name != null ? String(item.name) : item.title != null ? String(item.title) : null;
         const roundNumber =
           parsePositiveInt(item.round_number || item.round_no || item.roundNumber || item.order) || 1;
-        const sortOrder = parseNonNegInt(item.sort_order ?? item.sortOrder, roundNumber) ?? roundNumber;
+        const sortOrder =
+          parseNonNegInt(item.sort_order ?? item.sortOrder, roundNumber) ?? roundNumber;
 
         let existingId = null;
         if (publicRoundId) {
           const [found] = await connection.query(
-            `SELECT id FROM bracket_rounds WHERE public_round_id = ? LIMIT 1`,
-            [publicRoundId]
+            `SELECT id FROM bracket_rounds WHERE public_round_id = ? OR id = ? LIMIT 1`,
+            [publicRoundId, publicRoundId]
           );
           if (found[0]) existingId = found[0].id;
         }
+        if (!existingId) {
+          const [foundByNo] = await connection.query(
+            `SELECT id FROM bracket_rounds WHERE bracket_id = ? AND round_number = ? LIMIT 1`,
+            [bracketId, roundNumber]
+          );
+          if (foundByNo[0]) existingId = foundByNo[0].id;
+        }
+
+        let productionRoundId = null;
+        let wasCreated = false;
 
         if (existingId) {
+          productionRoundId = existingId;
           await connection.query(
             `UPDATE bracket_rounds SET
-              bracket_id = ?, public_bracket_id = ?, public_round_id = ?,
+              bracket_id = ?, public_bracket_id = ?,
+              public_round_id = COALESCE(public_round_id, ?),
               name = ?, round_number = ?, sort_order = ?, updated_at = NOW()
              WHERE id = ?`,
-            [bracketId, publicBracketId, publicRoundId, name, roundNumber, sortOrder, existingId]
+            [
+              bracketId,
+              publicBracketId,
+              publicRoundId || existingId,
+              name,
+              roundNumber,
+              sortOrder,
+              existingId,
+            ]
           );
+          if (!publicRoundId) {
+            const [row] = await connection.query(
+              `SELECT public_round_id FROM bracket_rounds WHERE id = ?`,
+              [productionRoundId]
+            );
+            if (!row[0]?.public_round_id) {
+              await connection.query(
+                `UPDATE bracket_rounds SET public_round_id = ? WHERE id = ?`,
+                [productionRoundId, productionRoundId]
+              );
+              publicRoundId = productionRoundId;
+            } else {
+              publicRoundId = Number(row[0].public_round_id);
+            }
+          }
           stats.updated += 1;
-          if (publicRoundId) roundIdByPublic.set(publicRoundId, existingId);
         } else {
           const [result, meta] = await connection.query(
             `INSERT INTO bracket_rounds (
@@ -2042,34 +2304,60 @@ router.post("/brackets", async (req, res) => {
             ) VALUES (?, ?, ?, ?, ?, ?)`,
             [publicRoundId, bracketId, publicBracketId, name, roundNumber, sortOrder]
           );
-          const newId = getInsertId(result, meta);
+          productionRoundId = getInsertId(result, meta);
+          if (!publicRoundId && productionRoundId) {
+            await connection.query(
+              `UPDATE bracket_rounds SET public_round_id = ? WHERE id = ?`,
+              [productionRoundId, productionRoundId]
+            );
+            publicRoundId = productionRoundId;
+          }
+          wasCreated = true;
           stats.created += 1;
-          if (publicRoundId) roundIdByPublic.set(publicRoundId, newId);
         }
+
+        rememberRoundKeys(productionRoundId, publicRoundId || productionRoundId, item, bracketId, roundNumber);
+        if (controllerRoundKey) roundIdByKey.set(controllerRoundKey, productionRoundId);
+
+        mappings.rounds.push({
+          public_bracket_id: publicBracketId,
+          public_round_id: publicRoundId || productionRoundId,
+          id: productionRoundId,
+          round_no: roundNumber,
+          controller_key: controllerRoundKey,
+          created: wasCreated,
+        });
       } catch (err) {
         stats.failed += 1;
         stats.errors.push({
           entity: "bracket_round",
+          item: "bracket_round",
+          public_bracket_id: item?.public_bracket_id ?? null,
           public_round_id: item?.public_round_id ?? item?.id ?? null,
+          error: err.message,
           message: err.message,
         });
       }
     }
 
-    // 3) Nodes
+    // 3) Nodes — public_node_id optional on first sync
     for (const item of nodes) {
       try {
         if (!item || typeof item !== "object") {
           throw new Error("Invalid bracket_node item (expected object)");
         }
 
-        const publicNodeId = pickPublicId(item.public_node_id, item.publicNodeId, item.id);
-        const publicBracketId = pickPublicId(
-          item.public_bracket_id,
-          item.publicBracketId,
-          item.bracket_public_id
+        let publicNodeId = pickPublicId(item.public_node_id, item.publicNodeId);
+        const controllerNodeKey = pickControllerKey(
+          item.controller_node_id,
+          item.local_id,
+          item.node_key,
+          item.nodeKey,
+          item.id
         );
-        const publicRoundId = pickPublicId(
+        const { bracketId, publicBracketId } = await resolveBracketIdForChild(item, "bracket_node");
+
+        let publicRoundId = pickPublicId(
           item.public_round_id,
           item.publicRoundId,
           item.round_public_id
@@ -2082,45 +2370,57 @@ router.post("/brackets", async (req, res) => {
         const nextPublicNodeId = pickPublicId(
           item.next_public_node_id,
           item.nextPublicNodeId,
-          item.next_node_public_id
+          item.next_node_public_id,
+          item.winner_to_public_node_id
         );
 
-        let bracketId =
-          parsePositiveInt(item.bracket_id || item.bracketId) ||
-          (publicBracketId ? bracketIdByPublic.get(publicBracketId) : null);
-        if (!bracketId && publicBracketId) {
-          const [found] = await connection.query(
-            `SELECT id FROM brackets WHERE public_bracket_id = ? LIMIT 1`,
-            [publicBracketId]
-          );
-          if (found[0]) {
-            bracketId = found[0].id;
-            bracketIdByPublic.set(publicBracketId, bracketId);
+        let roundId = null;
+        for (const c of [publicRoundId, item.round_id, item.roundId, item.controller_round_id]) {
+          const key = pickControllerKey(c);
+          if (key && roundIdByKey.has(key)) {
+            roundId = roundIdByKey.get(key);
+            break;
           }
         }
-        if (!bracketId) {
-          throw new Error(
-            `Cannot resolve bracket for node (public_node_id=${publicNodeId}). Provide public_bracket_id.`
-          );
-        }
-
-        let roundId =
-          parsePositiveInt(item.round_id || item.roundId) ||
-          (publicRoundId ? roundIdByPublic.get(publicRoundId) : null);
         if (!roundId && publicRoundId) {
           const [found] = await connection.query(
-            `SELECT id FROM bracket_rounds WHERE public_round_id = ? LIMIT 1`,
-            [publicRoundId]
+            `SELECT id FROM bracket_rounds WHERE public_round_id = ? OR id = ? LIMIT 1`,
+            [publicRoundId, publicRoundId]
           );
           if (found[0]) {
             roundId = found[0].id;
-            roundIdByPublic.set(publicRoundId, roundId);
+            roundIdByKey.set(String(publicRoundId), roundId);
           }
+        }
+
+        const roundNumber = parsePositiveInt(
+          item.round_number || item.round_no || item.roundNumber
+        );
+        if (!roundId && roundNumber) {
+          roundId = roundIdByBracketAndNumber.get(roundMapKey(bracketId, roundNumber)) || null;
+          if (!roundId) {
+            const [found] = await connection.query(
+              `SELECT id FROM bracket_rounds WHERE bracket_id = ? AND round_number = ? LIMIT 1`,
+              [bracketId, roundNumber]
+            );
+            if (found[0]) roundId = found[0].id;
+          }
+        }
+
+        // Load public_round_id for response if we only have production round id
+        if (roundId && !publicRoundId) {
+          const [rrow] = await connection.query(
+            `SELECT public_round_id FROM bracket_rounds WHERE id = ? LIMIT 1`,
+            [roundId]
+          );
+          if (rrow[0]?.public_round_id) publicRoundId = Number(rrow[0].public_round_id);
+          else publicRoundId = roundId;
         }
 
         let matchId = parsePositiveInt(item.match_id || item.matchId) || null;
         if (!matchId && publicMatchId) {
-          matchId = await findMatchIdByPublicId(connection, publicMatchId);
+          const m = await findMatchForSync(connection, publicMatchId);
+          matchId = m?.id || null;
         }
 
         const position =
@@ -2143,21 +2443,45 @@ router.post("/brackets", async (req, res) => {
         );
         const winnerTeamId = parsePositiveInt(item.winner_team_id || item.winnerTeamId);
         const status = normalizeStatus(item.status) || "pending";
+        const nodeKey = item.node_key || item.nodeKey || null;
 
         let existingId = null;
         if (publicNodeId) {
           const [found] = await connection.query(
-            `SELECT id FROM bracket_nodes WHERE public_node_id = ? LIMIT 1`,
-            [publicNodeId]
+            `SELECT id FROM bracket_nodes WHERE public_node_id = ? OR id = ? LIMIT 1`,
+            [publicNodeId, publicNodeId]
           );
           if (found[0]) existingId = found[0].id;
         }
+        if (!existingId && nodeKey) {
+          try {
+            const [foundKey] = await connection.query(
+              `SELECT id FROM bracket_nodes WHERE bracket_id = ? AND node_key = ? LIMIT 1`,
+              [bracketId, nodeKey]
+            );
+            if (foundKey[0]) existingId = foundKey[0].id;
+          } catch (_) {
+            /* optional column */
+          }
+        }
+        // Position within bracket+round for first-time create
+        if (!existingId && roundId != null) {
+          const [foundPos] = await connection.query(
+            `SELECT id FROM bracket_nodes WHERE bracket_id = ? AND round_id = ? AND position = ? LIMIT 1`,
+            [bracketId, roundId, position]
+          );
+          if (foundPos[0]) existingId = foundPos[0].id;
+        }
+
+        let productionNodeId = null;
+        let wasCreated = false;
 
         if (existingId) {
+          productionNodeId = existingId;
           await connection.query(
             `UPDATE bracket_nodes SET
               bracket_id = ?, round_id = ?, public_bracket_id = ?, public_round_id = ?,
-              public_node_id = ?, public_match_id = ?, match_id = ?, position = ?,
+              public_node_id = COALESCE(public_node_id, ?), public_match_id = ?, match_id = ?, position = ?,
               blue_team_id = ?, red_team_id = ?, winner_team_id = ?,
               next_public_node_id = ?, status = ?, updated_at = NOW()
              WHERE id = ?`,
@@ -2166,7 +2490,7 @@ router.post("/brackets", async (req, res) => {
               roundId,
               publicBracketId,
               publicRoundId,
-              publicNodeId,
+              publicNodeId || existingId,
               publicMatchId,
               matchId,
               position,
@@ -2178,8 +2502,22 @@ router.post("/brackets", async (req, res) => {
               existingId,
             ]
           );
+          if (!publicNodeId) {
+            const [nrow] = await connection.query(
+              `SELECT public_node_id FROM bracket_nodes WHERE id = ?`,
+              [productionNodeId]
+            );
+            if (!nrow[0]?.public_node_id) {
+              await connection.query(`UPDATE bracket_nodes SET public_node_id = ? WHERE id = ?`, [
+                productionNodeId,
+                productionNodeId,
+              ]);
+              publicNodeId = productionNodeId;
+            } else {
+              publicNodeId = Number(nrow[0].public_node_id);
+            }
+          }
           stats.updated += 1;
-          if (publicNodeId) nodeIdByPublic.set(publicNodeId, existingId);
         } else {
           const [result, meta] = await connection.query(
             `INSERT INTO bracket_nodes (
@@ -2203,39 +2541,81 @@ router.post("/brackets", async (req, res) => {
               status,
             ]
           );
-          const newId = getInsertId(result, meta);
+          productionNodeId = getInsertId(result, meta);
+          if (!publicNodeId && productionNodeId) {
+            await connection.query(`UPDATE bracket_nodes SET public_node_id = ? WHERE id = ?`, [
+              productionNodeId,
+              productionNodeId,
+            ]);
+            publicNodeId = productionNodeId;
+          }
+          wasCreated = true;
           stats.created += 1;
-          if (publicNodeId) nodeIdByPublic.set(publicNodeId, newId);
         }
+
+        if (nodeKey) {
+          try {
+            await connection.query(
+              `UPDATE bracket_nodes SET node_key = COALESCE(?, node_key) WHERE id = ?`,
+              [nodeKey, productionNodeId]
+            );
+          } catch (_) {
+            /* optional */
+          }
+        }
+
+        rememberNodeKeys(productionNodeId, publicNodeId || productionNodeId, item);
+        if (controllerNodeKey) nodeIdByKey.set(controllerNodeKey, productionNodeId);
+
+        mappings.nodes.push({
+          public_bracket_id: publicBracketId,
+          public_round_id: publicRoundId || roundId,
+          public_node_id: publicNodeId || productionNodeId,
+          id: productionNodeId,
+          node_key: nodeKey,
+          controller_key: controllerNodeKey,
+          created: wasCreated,
+        });
       } catch (err) {
         stats.failed += 1;
         stats.errors.push({
           entity: "bracket_node",
+          item: "bracket_node",
+          public_bracket_id: item?.public_bracket_id ?? null,
           public_node_id: item?.public_node_id ?? item?.id ?? null,
+          error: err.message,
           message: err.message,
         });
       }
     }
 
-    // Resolve next_node_id from next_public_node_id
-    if (nodeIdByPublic.size > 0) {
-      for (const [, localNodeId] of nodeIdByPublic.entries()) {
+    // Resolve next_node_id from next_public_node_id / controller keys
+    if (nodeIdByKey.size > 0) {
+      const seenLocal = new Set();
+      for (const localNodeId of nodeIdByKey.values()) {
+        if (seenLocal.has(localNodeId)) continue;
+        seenLocal.add(localNodeId);
+
         const [rows] = await connection.query(
           `SELECT next_public_node_id FROM bracket_nodes WHERE id = ?`,
           [localNodeId]
         );
-        const nextPublic = rows[0]?.next_public_node_id
-          ? Number(rows[0].next_public_node_id)
-          : null;
-        if (!nextPublic) continue;
+        const nextRef = rows[0]?.next_public_node_id;
+        if (nextRef == null || nextRef === "") continue;
 
-        let nextLocal = nodeIdByPublic.get(nextPublic) || null;
+        let nextLocal =
+          nodeIdByKey.get(String(nextRef)) ||
+          nodeIdByKey.get(String(Number(nextRef))) ||
+          null;
         if (!nextLocal) {
-          const [found] = await connection.query(
-            `SELECT id FROM bracket_nodes WHERE public_node_id = ? LIMIT 1`,
-            [nextPublic]
-          );
-          nextLocal = found[0]?.id || null;
+          const n = parsePositiveInt(nextRef);
+          if (n) {
+            const [found] = await connection.query(
+              `SELECT id FROM bracket_nodes WHERE public_node_id = ? OR id = ? LIMIT 1`,
+              [n, n]
+            );
+            nextLocal = found[0]?.id || null;
+          }
         }
 
         if (nextLocal) {
@@ -2251,15 +2631,38 @@ router.post("/brackets", async (req, res) => {
     connection.release();
 
     stats.success = stats.failed === 0;
+    const primaryPublicBracketId =
+      latestPublicBracketId ||
+      mappings.brackets[0]?.public_bracket_id ||
+      latestBracketId ||
+      null;
+    const primaryProductionId = latestBracketId || mappings.brackets[0]?.id || null;
+
     const response = {
       ...stats,
       warnings,
       tournament_id: defaultTournamentId || null,
       tournament_mode_id: defaultModeId || null,
+      // Controller-friendly IDs (first-time create must return these)
+      id: primaryProductionId,
+      public_id: primaryPublicBracketId || primaryProductionId,
+      public_bracket_id: primaryPublicBracketId || primaryProductionId,
+      data: {
+        id: primaryProductionId,
+        public_bracket_id: primaryPublicBracketId || primaryProductionId,
+        public_id: primaryPublicBracketId || primaryProductionId,
+        mappings,
+        created: stats.created,
+        updated: stats.updated,
+        failed: stats.failed,
+        errors: stats.errors,
+        warnings,
+      },
+      mappings,
     };
 
     console.log(
-      `[sync-api] brackets sync received=${stats.received} created=${stats.created} updated=${stats.updated} failed=${stats.failed}`
+      `[sync-api] brackets sync received=${stats.received} created=${stats.created} updated=${stats.updated} failed=${stats.failed} public_bracket_id=${response.public_bracket_id}`
     );
 
     // Partial success → 200; total failure with errors → 400 with detailed messages
